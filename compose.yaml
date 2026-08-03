@@ -1,0 +1,19 @@
+services:
+  console:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://host.docker.internal:8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
+      CH_CONSOLE_ADMIN_USER: ${CH_CONSOLE_ADMIN_USER:-admin}
+      CH_CONSOLE_ADMIN_PASSWORD: ${CH_CONSOLE_ADMIN_PASSWORD:-}
+    volumes:
+      - console-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+volumes:
+  console-data:

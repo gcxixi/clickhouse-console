@@ -1,0 +1,8 @@
+/clickhouse-console
+/data/
+/.env
+/.env.*
+!/.env.example
+*.log
+coverage.out
+.DS_Store
