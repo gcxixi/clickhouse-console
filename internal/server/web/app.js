@@ -5,6 +5,35 @@ const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
 const monitorCacheTTL = 60 * 60 * 1000;
 let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: ''};
 
+const lucideIcons = {
+  activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  'arrow-right': '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
+  'code-xml': '<path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/>',
+  copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  'log-out': '<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>',
+  network: '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
+  pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+  play: '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  'refresh-cw': '<path d="M3 12a9 9 0 0 1 15.74-6.26L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.74 6.26L3 16"/><path d="M8 16H3v5"/>',
+  'scroll-text': '<path d="M15 12h-5M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  'server-cog': '<path d="m10.85 14.77-.38.93M13.15 14.77a3 3 0 1 0-2.3-5.54l-.38-.93M13.15 9.23l.38-.93M13.53 15.7l-.38-.93M14.77 10.85l.93-.38M14.77 13.15l.93.38M9.23 10.85l-.93-.38M9.23 13.15l-.93.38"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5M6 18h.01M6 6h.01"/>',
+  'square-terminal': '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/>',
+  'table-2': '<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
+  'trash-2': '<path d="M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3.13a4 4 0 0 1 0 7.74M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
+  x: '<path d="M18 6 6 18M6 6l12 12"/>'
+};
+
+function icon(name, size = 16) {
+  return `<svg class="lucide-icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${lucideIcons[name] || ''}</svg>`;
+}
+
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-lucide]').forEach(element => { element.innerHTML = icon(element.dataset.lucide, Number(element.dataset.iconSize) || 16); });
+}
+
 async function api(path, opts = {}) {
   opts.headers = {...(opts.headers || {})};
   if (opts.body) opts.headers['Content-Type'] = 'application/json';
@@ -60,23 +89,12 @@ $('#logout').onclick = async () => {
   }
 };
 
-const views = {
-  query: ['SQL 工作台', '查询并管理 ClickHouse 数据'],
-  schema: ['对象浏览器', '浏览数据库和数据表'],
-  monitor: ['运行监控', '查看当前 ClickHouse 集群运行状态'],
-  clusters: ['集群管理', '安全配置 ClickHouse 连接'],
-  users: ['用户管理', '管理控制台账号与角色'],
-  audit: ['审计日志', '追踪关键操作与执行结果']
-};
-
 function activateView(view) {
   state.activeView = view;
   $('main').classList.toggle('query-active', view === 'query');
   $$('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   $$('.view').forEach(element => element.classList.add('hidden'));
   $(`#${view}View`).classList.remove('hidden');
-  $('#title').textContent = views[view][0];
-  $('#subtitle').textContent = views[view][1];
   if (view === 'schema') loadDatabases();
   if (view === 'monitor') loadMonitor();
   if (view === 'clusters') loadManagedClusters();
@@ -140,7 +158,7 @@ $('#clusterForm').onsubmit = async event => {
     resetEditorTables();
     resetQueryResult();
     $('#databases').replaceChildren();
-    $('#tablesTitle').textContent = '数据表';
+    $('#tablesTitle').innerHTML = `${icon('table-2')}<span>数据表</span>`;
     $('#tables').innerHTML = '<div class="empty">选择一个数据库</div>';
     checkHealth();
     loadEditorDatabases().catch(error => toast(error.message));
@@ -301,7 +319,7 @@ async function runQuery() {
   const sql = $('#sql').value.trim();
   if (!sql) return;
   $('#run').disabled = true;
-  $('#run').textContent = '执行中…';
+  $('#run').innerHTML = `${icon('play', 13)}<span>执行中…</span>`;
   $('#queryStatus').className = 'status hidden';
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql})});
@@ -314,7 +332,7 @@ async function runQuery() {
     $('#queryStatus').textContent = error.message;
   } finally {
     $('#run').disabled = false;
-    $('#run').innerHTML = '▶ 运行 <kbd>⌘↵</kbd>';
+    $('#run').innerHTML = `${icon('play', 13)}<span>运行</span><kbd>⌘↵</kbd>`;
   }
 }
 
@@ -393,7 +411,7 @@ $('#result').addEventListener('mouseover', event => {
 async function loadDatabases() {
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: 'SELECT name FROM system.databases ORDER BY name'})});
-    $('#databases').innerHTML = result.data.map(row => `<button data-db="${esc(row.name)}">▱ &nbsp;${esc(row.name)}</button>`).join('');
+    $('#databases').innerHTML = result.data.map(row => `<button data-db="${esc(row.name)}">${icon('database')}<span>${esc(row.name)}</span></button>`).join('');
     $$('#databases button').forEach(button => button.onclick = () => loadTables(button.dataset.db, button));
   } catch (error) { toast(error.message); }
 }
@@ -401,19 +419,19 @@ async function loadDatabases() {
 async function loadTables(database, databaseButton) {
   $$('#databases button').forEach(button => button.classList.remove('active'));
   databaseButton.classList.add('active');
-  $('#tablesTitle').textContent = `${database} / 数据表`;
+  $('#tablesTitle').innerHTML = `${icon('table-2')}<span>${esc(database)} / 数据表</span>`;
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: `SELECT name, engine, total_rows, total_bytes FROM system.tables WHERE database=${sqlLiteral(database)} ORDER BY name`})});
     $('#tables').innerHTML = result.data.length ? result.data.map(row => `
       <div class="table-entry" data-db="${esc(database)}" data-table="${esc(row.name)}">
         <div class="table-summary">
-          <div class="table-identity"><strong>▦ ${esc(row.name)}</strong><small>${esc(row.engine)} · ${esc(value(row.total_rows))} rows · 磁盘 ${esc(formatBytes(row.total_bytes))}</small></div>
+          <div class="table-identity"><strong>${icon('table-2')}<span>${esc(row.name)}</span></strong><small>${esc(row.engine)} · ${esc(value(row.total_rows))} rows · 磁盘 ${esc(formatBytes(row.total_bytes))}</small></div>
           <div class="table-actions">
-            <button class="table-action ddl-action" title="查看建表语句" aria-label="查看 ${esc(row.name)} 建表语句" aria-expanded="false">⌘</button>
-            <button class="table-action query-action" title="在工作台查询" aria-label="查询 ${esc(row.name)}">▶</button>
+            <button class="table-action ddl-action" title="查看建表语句" aria-label="查看 ${esc(row.name)} 建表语句" aria-expanded="false">${icon('code-xml')}</button>
+            <button class="table-action query-action" title="在工作台查询" aria-label="查询 ${esc(row.name)}">${icon('play')}</button>
           </div>
         </div>
-        <div class="ddl-panel hidden"><div class="ddl-heading"><span>建表语句</span><button class="copy-ddl" title="复制建表语句" aria-label="复制建表语句" disabled>⧉</button></div><pre>加载中…</pre></div>
+        <div class="ddl-panel hidden"><div class="ddl-heading"><span>建表语句</span><button class="copy-ddl" title="复制建表语句" aria-label="复制建表语句" disabled>${icon('copy')}</button></div><pre>加载中…</pre></div>
       </div>`).join('') : '<div class="empty">暂无数据表</div>';
     $$('#tables .ddl-action').forEach(button => button.onclick = () => toggleDDL(button));
     $$('#tables .query-action').forEach(button => button.onclick = () => openTableInWorkbench(button.closest('.table-entry').dataset.db, button.closest('.table-entry').dataset.table));
@@ -478,7 +496,7 @@ $('#refreshSchema').onclick = loadDatabases;
 async function loadManagedClusters() {
   try {
     state.managedClusters = await api('/api/clusters');
-    $('#clusterRows').innerHTML = state.managedClusters.map(cluster => `<tr><td><strong>${esc(cluster.alias)}</strong></td><td><span class="tag">${cluster.source === 'platform' ? '平台' : '环境变量'}</span></td><td class="code" title="${esc(cluster.url)}">${esc(cluster.url)}</td><td>${esc(cluster.database)}</td><td><span class="tag ok">已加密配置</span></td><td>${cluster.source === 'platform' ? `<div class="row-actions"><button class="ghost edit-cluster" data-id="${esc(cluster.id)}">编辑</button><button class="ghost delete-cluster" data-id="${esc(cluster.id)}">删除</button></div>` : '<span class="muted">只读</span>'}</td></tr>`).join('');
+    $('#clusterRows').innerHTML = state.managedClusters.map(cluster => `<tr><td><strong>${esc(cluster.alias)}</strong></td><td><span class="tag">${cluster.source === 'platform' ? '平台' : '环境变量'}</span></td><td class="code" title="${esc(cluster.url)}">${esc(cluster.url)}</td><td>${esc(cluster.database)}</td><td><span class="tag ok">已加密配置</span></td><td>${cluster.source === 'platform' ? `<div class="row-actions"><button class="ghost edit-cluster" data-id="${esc(cluster.id)}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-cluster" data-id="${esc(cluster.id)}">${icon('trash-2', 13)}<span>删除</span></button></div>` : '<span class="muted">只读</span>'}</td></tr>`).join('');
     $$('.edit-cluster').forEach(button => button.onclick = () => openClusterEditor(button.dataset.id));
     $$('.delete-cluster').forEach(button => button.onclick = () => deleteManagedCluster(button.dataset.id));
   } catch (error) { toast(error.message); }
@@ -655,7 +673,7 @@ async function fetchMonitor(cluster) {
   if (state.monitorLoadingCluster === cluster) return;
   state.monitorLoadingCluster = cluster;
   $('#refreshMonitor').disabled = true;
-  $('#refreshMonitor').textContent = '刷新中…';
+  $('#refreshMonitor').innerHTML = `${icon('refresh-cw', 13)}<span>刷新中…</span>`;
   $('#monitorError').classList.add('hidden');
   try {
     const result = await api('/api/monitor');
@@ -672,7 +690,7 @@ async function fetchMonitor(cluster) {
     if (state.monitorLoadingCluster === cluster) state.monitorLoadingCluster = '';
     if (cluster === state.activeCluster) {
       $('#refreshMonitor').disabled = false;
-      $('#refreshMonitor').textContent = '↻ 刷新';
+      $('#refreshMonitor').innerHTML = `${icon('refresh-cw', 13)}<span>刷新</span>`;
     }
   }
 }
@@ -741,4 +759,5 @@ function formatBytes(input) {
 function date(input) { return new Date(input).toLocaleString(); }
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2600); }
 
+hydrateIcons();
 (async () => { try { showApp(await api('/api/session')); } catch { showLogin(); } })();
