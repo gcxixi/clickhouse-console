@@ -20,10 +20,12 @@ type Client struct {
 	timeout                            time.Duration
 	http                               *http.Client
 }
+type Column struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
 type Result struct {
-	Meta []struct {
-		Name, Type string `json:",omitempty"`
-	} `json:"meta,omitempty"`
+	Meta       []Column         `json:"meta,omitempty"`
 	Data       []map[string]any `json:"data,omitempty"`
 	Rows       int              `json:"rows"`
 	Statistics any              `json:"statistics,omitempty"`

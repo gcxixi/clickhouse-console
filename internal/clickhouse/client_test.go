@@ -2,6 +2,7 @@ package clickhouse
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -48,5 +49,13 @@ func TestExecuteQuery(t *testing.T) {
 	}
 	if res.Rows != 1 || !strings.HasSuffix(body, "FORMAT JSON") {
 		t.Fatalf("unexpected result/body: %+v %q", res, body)
+	}
+	encoded, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := string(encoded)
+	if !strings.Contains(response, `"meta":[{"name":"n","type":"UInt8"}]`) || strings.Contains(response, `"Name"`) {
+		t.Fatalf("result metadata has frontend-incompatible field names: %s", response)
 	}
 }
