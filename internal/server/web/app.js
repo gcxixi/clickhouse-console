@@ -253,11 +253,11 @@ async function loadTables(database, databaseButton) {
   databaseButton.classList.add('active');
   $('#tablesTitle').textContent = `${database} / 数据表`;
   try {
-    const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: `SELECT name, engine, total_rows FROM system.tables WHERE database=${sqlLiteral(database)} ORDER BY name`})});
+    const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: `SELECT name, engine, total_rows, total_bytes FROM system.tables WHERE database=${sqlLiteral(database)} ORDER BY name`})});
     $('#tables').innerHTML = result.data.length ? result.data.map(row => `
       <div class="table-entry" data-db="${esc(database)}" data-table="${esc(row.name)}">
         <div class="table-summary">
-          <div class="table-identity"><strong>▦ ${esc(row.name)}</strong><small>${esc(row.engine)} · ${esc(value(row.total_rows))} rows</small></div>
+          <div class="table-identity"><strong>▦ ${esc(row.name)}</strong><small>${esc(row.engine)} · ${esc(value(row.total_rows))} rows · 磁盘 ${esc(formatBytes(row.total_bytes))}</small></div>
           <div class="table-actions">
             <button class="table-action ddl-action" title="查看建表语句" aria-label="查看 ${esc(row.name)} 建表语句" aria-expanded="false">⌘</button>
             <button class="table-action query-action" title="在工作台查询" aria-label="查询 ${esc(row.name)}">▶</button>
@@ -364,6 +364,18 @@ function quoteIdentifier(input) { return `\`${String(input).replaceAll('\\', '\\
 function sqlLiteral(input) { return `'${String(input).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`; }
 function esc(input) { return String(input ?? '').replace(/[&<>'"]/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[char])); }
 function value(input) { return typeof input === 'object' && input !== null ? JSON.stringify(input) : String(input ?? 'NULL'); }
+
+function formatBytes(input) {
+  if (input === null || input === undefined || input === '') return '—';
+  const bytes = Number(input);
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const amount = bytes / (1024 ** index);
+  const digits = index === 0 || amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toFixed(digits)} ${units[index]}`;
+}
 function date(input) { return new Date(input).toLocaleString(); }
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2600); }
 
