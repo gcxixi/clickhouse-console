@@ -21,6 +21,7 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
       CH_CONSOLE_ADMIN_USER: ${CH_CONSOLE_ADMIN_USER:-admin}
       CH_CONSOLE_ADMIN_PASSWORD: ${CH_CONSOLE_ADMIN_PASSWORD:-}
+      CH_CONSOLE_BASE_PATH: ${CH_CONSOLE_BASE_PATH:-}
     volumes:
       - console-data:/data
     extra_hosts:

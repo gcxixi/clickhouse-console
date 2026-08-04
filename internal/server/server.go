@@ -26,15 +26,21 @@ type session struct {
 	Expires time.Time
 }
 type Server struct {
-	db       *store.Store
-	ch       *ch.Client
-	log      *slog.Logger
-	mu       sync.RWMutex
-	sessions map[string]session
+	db         *store.Store
+	ch         *ch.Client
+	log        *slog.Logger
+	mu         sync.RWMutex
+	sessions   map[string]session
+	basePath   string
+	cookiePath string
 }
 
-func New(db *store.Store, chc *ch.Client, log *slog.Logger) http.Handler {
-	s := &Server{db: db, ch: chc, log: log, sessions: map[string]session{}}
+func New(db *store.Store, chc *ch.Client, log *slog.Logger, basePath string) http.Handler {
+	cookiePath := "/"
+	if basePath != "" {
+		cookiePath = basePath + "/"
+	}
+	s := &Server{db: db, ch: chc, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
 	m := http.NewServeMux()
 	m.HandleFunc("POST /api/login", s.login)
 	m.HandleFunc("POST /api/logout", s.auth(s.logout))
@@ -47,7 +53,19 @@ func New(db *store.Store, chc *ch.Client, log *slog.Logger) http.Handler {
 	m.HandleFunc("GET /api/audit", s.admin(s.audit))
 	sub, _ := fs.Sub(webFS, "web")
 	m.Handle("/", http.FileServer(http.FS(sub)))
-	return securityHeaders(m)
+	if basePath == "" {
+		return securityHeaders(m)
+	}
+	outer := http.NewServeMux()
+	outer.Handle(basePath+"/", http.StripPrefix(basePath, m))
+	outer.HandleFunc(basePath, func(w http.ResponseWriter, r *http.Request) {
+		target := basePath + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+	})
+	return securityHeaders(outer)
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Username, Password string }
@@ -65,7 +83,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.sessions[sid] = session{User: u, CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "ch_session", Value: sid, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil, MaxAge: 43200})
+	http.SetCookie(w, &http.Cookie{Name: "ch_session", Value: sid, Path: s.cookiePath, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", MaxAge: 43200})
 	s.db.AddAudit(store.Audit{User: u.Username, Action: "login", Status: "ok", RemoteAddr: remote(r)})
 	writeJSON(w, 200, map[string]any{"user": u, "csrf": csrf})
 }
@@ -76,7 +94,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, sid.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "ch_session", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: "ch_session", Path: s.cookiePath, MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(204)
 }
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
