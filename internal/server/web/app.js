@@ -71,6 +71,7 @@ const views = {
 
 function activateView(view) {
   state.activeView = view;
+  $('main').classList.toggle('query-active', view === 'query');
   $$('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   $$('.view').forEach(element => element.classList.add('hidden'));
   $(`#${view}View`).classList.remove('hidden');
