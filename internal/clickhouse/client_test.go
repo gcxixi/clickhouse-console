@@ -81,10 +81,12 @@ func TestMonitorCollectsExporterMetricSources(t *testing.T) {
 }
 
 func TestExecuteQuery(t *testing.T) {
-	var body string
+	var body, requestPath, route string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		body = string(b)
+		requestPath = r.URL.Path
+		route = r.URL.Query().Get("route")
 		if u, p, ok := r.BasicAuth(); !ok || u != "u" || p != "p" {
 			t.Error("missing auth")
 		}
@@ -92,13 +94,16 @@ func TestExecuteQuery(t *testing.T) {
 		_, _ = io.WriteString(w, `{"meta":[{"name":"n","type":"UInt8"}],"data":[{"n":1}],"rows":1}`)
 	}))
 	defer ts.Close()
-	c := New(ts.URL, "u", "p", "default", 10, time.Second)
+	c := New(ts.URL+"/gateway/ck/?route=preserved", "u", "p", "default", 10, time.Second)
 	res, err := c.Execute(context.Background(), "SELECT 1 AS n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Rows != 1 || !strings.HasSuffix(body, "FORMAT JSON") {
 		t.Fatalf("unexpected result/body: %+v %q", res, body)
+	}
+	if requestPath != "/gateway/ck/" || route != "preserved" {
+		t.Fatalf("ClickHouse endpoint changed to path %q with route %q", requestPath, route)
 	}
 	encoded, err := json.Marshal(res)
 	if err != nil {

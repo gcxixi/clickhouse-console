@@ -85,6 +85,8 @@ CH_CONSOLE_CLUSTERS='[
 
 别名只能包含字母、数字、点、下划线和连字符，最长 64 个字符。请把真实密码放在部署环境或密钥管理系统中，不要提交 `.env`。未设置 `CH_CONSOLE_CLUSTERS` 时，原有 `CLICKHOUSE_URL`、`CLICKHOUSE_USER`、`CLICKHOUSE_PASSWORD` 和 `CLICKHOUSE_DATABASE` 配置继续有效。
 
+集群地址会按配置原样请求，包括路径前缀、尾部斜杠和已有查询参数。例如 `https://abc.example.com:8810/ck/` 会请求 `/ck/`，适用于由流量网关将该路径代理到 ClickHouse HTTP 端口的场景。请确保网关允许 POST，并把 ClickHouse 返回的状态码和响应体原样转发。
+
 管理员还可以从“集群管理”页面新增和维护集群。环境变量集群会显示为只读，平台集群保存在数据目录的 `platform-clusters.json` 中。ClickHouse 用户名和密码不会出现在 API 响应或明文数据文件中：浏览器使用一次性 AES-GCM 密钥加密凭据，并通过服务端临时 RSA-OAEP 公钥封装该密钥；服务端解密后，再使用持久化 AES-256-GCM 主密钥加密保存。
 
 未设置 `CH_CONSOLE_ENCRYPTION_KEY` 时，程序会在数据目录生成权限为 `0600` 的 `cluster-encryption.key`。生产环境可以使用 `openssl rand -base64 32` 生成稳定密钥并通过密钥管理系统注入。必须备份该密钥；密钥丢失后，已有平台集群凭据无法恢复。应用层凭据封装不能替代 HTTPS，因为明文 HTTP 下的公钥仍可能被中间人替换；非 localhost 部署必须使用 TLS 反向代理。

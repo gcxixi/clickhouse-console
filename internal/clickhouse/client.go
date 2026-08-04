@@ -44,7 +44,7 @@ type Monitoring struct {
 var firstWord = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)*([a-z]+)`)
 
 func New(endpoint, user, password, database string, maxRows int, timeout time.Duration) *Client {
-	return &Client{endpoint: strings.TrimRight(endpoint, "/"), user: user, password: password, database: database, maxRows: maxRows, timeout: timeout, http: &http.Client{Timeout: timeout + 5*time.Second}}
+	return &Client{endpoint: strings.TrimSpace(endpoint), user: user, password: password, database: database, maxRows: maxRows, timeout: timeout, http: &http.Client{Timeout: timeout + 5*time.Second}}
 }
 func Classify(sql string) (string, error) {
 	s := strings.TrimSpace(sql)
