@@ -40,9 +40,12 @@ func main() {
 	if generated != "" {
 		log.Warn("bootstrap administrator created; save this password now", "username", cfg.AdminUser, "password", generated)
 	}
-	client := ch.New(cfg.ClickHouseURL, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.Database, cfg.MaxRows, cfg.QueryTimeout)
-	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, client, log, cfg.BasePath), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
-	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath)
+	clusters := make([]server.Cluster, 0, len(cfg.Clusters))
+	for _, cluster := range cfg.Clusters {
+		clusters = append(clusters, server.Cluster{Alias: cluster.Alias, Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout)})
+	}
+	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, clusters, log, cfg.BasePath), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
+	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath, "clusters", len(clusters))
 	if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("server stopped", "error", err)
 		os.Exit(1)

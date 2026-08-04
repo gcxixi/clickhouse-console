@@ -2,7 +2,8 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => document.querySelectorAll(selector);
 const apiRoot = new URL('api/', document.baseURI);
 const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
-let state = {csrf: '', user: null, suggestedSQL: '', selectedDatabase: '', selectedTable: ''};
+const monitorCacheTTL = 60 * 60 * 1000;
+let state = {csrf: '', user: null, clusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
 
 async function api(path, opts = {}) {
   opts.headers = {...(opts.headers || {})};
@@ -27,12 +28,15 @@ function showLogin() {
 
 function showApp(data) {
   state = {...state, ...data};
+  state.clusters = data.clusters || state.clusters;
+  state.activeCluster = data.active_cluster || state.activeCluster;
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#username').textContent = data.user.Username;
   $('#role').textContent = data.user.Role;
   $('#avatar').textContent = data.user.Username[0].toUpperCase();
   $$('.admin-only').forEach(element => element.classList.toggle('hidden', data.user.Role !== 'admin'));
+  renderClusterSelector();
   checkHealth();
   loadEditorDatabases().catch(error => toast(error.message));
 }
@@ -51,7 +55,7 @@ $('#loginForm').addEventListener('submit', async event => {
 $('#logout').onclick = async () => {
   try { await api('/api/logout', {method: 'POST'}); }
   finally {
-    state = {csrf: '', user: null, suggestedSQL: '', selectedDatabase: '', selectedTable: ''};
+    state = {csrf: '', user: null, clusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
     showLogin();
   }
 };
@@ -59,17 +63,20 @@ $('#logout').onclick = async () => {
 const views = {
   query: ['SQL 工作台', '查询并管理 ClickHouse 数据'],
   schema: ['对象浏览器', '浏览数据库和数据表'],
+  monitor: ['运行监控', '查看当前 ClickHouse 集群运行状态'],
   users: ['用户管理', '管理控制台账号与角色'],
   audit: ['审计日志', '追踪关键操作与执行结果']
 };
 
 function activateView(view) {
+  state.activeView = view;
   $$('nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   $$('.view').forEach(element => element.classList.add('hidden'));
   $(`#${view}View`).classList.remove('hidden');
   $('#title').textContent = views[view][0];
   $('#subtitle').textContent = views[view][1];
   if (view === 'schema') loadDatabases();
+  if (view === 'monitor') loadMonitor();
   if (view === 'users') loadUsers();
   if (view === 'audit') loadAudit();
 }
@@ -77,15 +84,72 @@ function activateView(view) {
 $$('nav button').forEach(button => button.onclick = () => activateView(button.dataset.view));
 
 async function checkHealth() {
+  const cluster = state.activeCluster;
   try {
     await api('/api/health');
+    if (cluster !== state.activeCluster) return;
     $('#health').className = 'health ok';
-    $('#health span').textContent = 'ClickHouse 已连接';
+    $('#health span').textContent = `${cluster} · 已连接`;
   } catch {
+    if (cluster !== state.activeCluster) return;
     $('#health').className = 'health bad';
-    $('#health span').textContent = 'ClickHouse 连接失败';
+    $('#health span').textContent = `${cluster} · 连接失败`;
   }
 }
+
+function renderClusterSelector() {
+  const select = $('#clusterSelect');
+  select.replaceChildren(...state.clusters.map(cluster => new Option(cluster.alias, cluster.alias)));
+  select.value = state.activeCluster;
+  select.disabled = state.clusters.length < 2;
+}
+
+$('#clusterSelect').addEventListener('change', event => {
+  const target = event.target.value;
+  event.target.value = state.activeCluster;
+  if (!target || target === state.activeCluster) return;
+  state.pendingCluster = target;
+  $('#clusterFrom').textContent = state.activeCluster;
+  $('#clusterTo').textContent = target;
+  $('#clusterDialog').showModal();
+});
+
+$$('.close-cluster').forEach(button => button.onclick = () => {
+  state.pendingCluster = '';
+  $('#clusterDialog').close();
+});
+
+$('#clusterForm').onsubmit = async event => {
+  event.preventDefault();
+  const alias = state.pendingCluster;
+  if (!alias) return;
+  const submit = event.submitter;
+  submit.disabled = true;
+  submit.textContent = '切换中…';
+  try {
+    const data = await api('/api/cluster', {method: 'POST', body: JSON.stringify({alias, confirm_alias: alias})});
+    state = {...state, ...data, clusters: data.clusters || state.clusters, activeCluster: data.active_cluster};
+    state.pendingCluster = '';
+    $('#clusterDialog').close();
+    renderClusterSelector();
+    clearSuggestedSQL();
+    $('#sql').value = '';
+    resetEditorTables();
+    resetQueryResult();
+    $('#databases').replaceChildren();
+    $('#tablesTitle').textContent = '数据表';
+    $('#tables').innerHTML = '<div class="empty">选择一个数据库</div>';
+    checkHealth();
+    loadEditorDatabases().catch(error => toast(error.message));
+    if (state.activeView === 'schema') loadDatabases();
+    if (state.activeView === 'monitor') loadMonitor();
+    toast(`已切换到集群 ${alias}`);
+  } catch (error) { toast(error.message); }
+  finally {
+    submit.disabled = false;
+    submit.textContent = '确认切换';
+  }
+};
 
 function setSelectOptions(select, label, values) {
   select.replaceChildren(new Option(label, ''), ...values.map(value => new Option(value, value)));
@@ -354,16 +418,114 @@ $('#userForm').onsubmit = async event => {
 async function loadAudit() {
   try {
     const rows = await api('/api/audit?limit=500');
-    $('#auditRows').innerHTML = rows.map(row => `<tr><td>${date(row.At)}</td><td>${esc(row.User || '—')}</td><td>${esc(row.Action)}</td><td><span class="tag ${row.Status === 'ok' ? 'ok' : 'error'}">${esc(row.Status)}</span></td><td>${row.DurationMS || 0} ms</td><td class="code" title="${esc(row.Error || row.Statement)}">${esc(row.Error || row.Statement || '—')}</td></tr>`).join('');
+    $('#auditRows').innerHTML = rows.map(row => `<tr><td>${date(row.At)}</td><td>${esc(row.User || '—')}</td><td><span class="tag">${esc(row.Cluster || '—')}</span></td><td>${esc(row.Action)}</td><td><span class="tag ${row.Status === 'ok' ? 'ok' : 'error'}">${esc(row.Status)}</span></td><td>${row.DurationMS || 0} ms</td><td class="code" title="${esc(row.Error || row.Statement)}">${esc(row.Error || row.Statement || '—')}</td></tr>`).join('');
   } catch (error) { toast(error.message); }
 }
 
 $('#refreshAudit').onclick = loadAudit;
 
+function monitorCacheKey(cluster) { return `clickhouse-console:${apiRoot.pathname}:monitor:${cluster}`; }
+function readMonitorCache(cluster) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(monitorCacheKey(cluster)) || 'null');
+    if (!cached || cached.cluster !== cluster || !cached.snapshot || !Number.isFinite(cached.recordedAt)) return null;
+    return cached;
+  } catch { return null; }
+}
+function writeMonitorCache(cluster, snapshot, recordedAt) {
+  try { localStorage.setItem(monitorCacheKey(cluster), JSON.stringify({cluster, snapshot, recordedAt})); } catch {}
+}
+
+async function loadMonitor(force = false) {
+  const cluster = state.activeCluster;
+  if (!cluster) return;
+  const cached = readMonitorCache(cluster);
+  if (!force && cached) {
+    renderMonitor(cached.snapshot, true, cached.recordedAt);
+    if (Date.now() - cached.recordedAt <= monitorCacheTTL) return;
+  }
+  await fetchMonitor(cluster);
+}
+
+async function fetchMonitor(cluster) {
+  if (state.monitorLoadingCluster === cluster) return;
+  state.monitorLoadingCluster = cluster;
+  $('#refreshMonitor').disabled = true;
+  $('#refreshMonitor').textContent = '刷新中…';
+  $('#monitorError').classList.add('hidden');
+  try {
+    const result = await api('/api/monitor');
+    if (cluster !== state.activeCluster || result.cluster !== cluster) return;
+    const recordedAt = Date.now();
+    writeMonitorCache(cluster, result.snapshot, recordedAt);
+    renderMonitor(result.snapshot, false, recordedAt);
+  } catch (error) {
+    if (cluster !== state.activeCluster) return;
+    $('#monitorError').textContent = error.message;
+    $('#monitorError').classList.remove('hidden');
+    if (!readMonitorCache(cluster)) $('#monitorContent').innerHTML = '<div class="empty monitor-empty">监控数据加载失败</div>';
+  } finally {
+    if (state.monitorLoadingCluster === cluster) state.monitorLoadingCluster = '';
+    if (cluster === state.activeCluster) {
+      $('#refreshMonitor').disabled = false;
+      $('#refreshMonitor').textContent = '↻ 刷新';
+    }
+  }
+}
+
+function renderMonitor(snapshot, cached, recordedAt) {
+  const source = $('#monitorSource');
+  source.className = cached ? 'cached' : 'live';
+  source.textContent = cached ? `非最新数据 · 本地缓存于 ${date(recordedAt)}` : `实时数据 · 获取于 ${date(snapshot.generated_at || recordedAt)}`;
+  const metrics = [...(snapshot.metrics || []), ...(snapshot.asynchronous_metrics || [])];
+  const metricMap = new Map(metrics.map(row => [String(row.metric), number(row.value)]));
+  const parts = snapshot.parts || [];
+  const partBytes = parts.reduce((sum, row) => sum + number(row.bytes), 0);
+  const partCount = parts.reduce((sum, row) => sum + number(row.parts), 0);
+  const cards = [
+    ['运行查询', formatCount(metricMap.get('Query'))],
+    ['后台合并', formatCount(metricMap.get('Merge'))],
+    ['内存占用', formatBytes(metricMap.get('MemoryTracking'))],
+    ['运行时间', formatDuration(metricMap.get('Uptime'))],
+    ['活动数据分区', formatCount(partCount)]
+  ];
+  const disks = snapshot.disks || [];
+  const events = [...(snapshot.events || [])].sort((a, b) => number(b.value) - number(a.value));
+  const diskHTML = disks.length ? disks.map(row => {
+    const total = number(row.total_space_in_bytes);
+    const free = number(row.free_space_in_bytes);
+    const used = Math.max(0, total - free);
+    const percent = total > 0 ? Math.min(100, used / total * 100) : 0;
+    return `<div class="disk-row"><strong>${esc(row.name)}</strong><div class="capacity-track" title="已使用 ${esc(formatBytes(used))}"><i style="width:${percent.toFixed(1)}%"></i></div><small>${esc(formatBytes(used))} / ${esc(formatBytes(total))} · ${percent.toFixed(1)}%</small></div>`;
+  }).join('') : '<div class="empty">暂无磁盘数据</div>';
+  const partsRows = parts.map(row => `<tr><td>${esc(row.database)}</td><td class="code" title="${esc(row.table)}">${esc(row.table)}</td><td>${esc(row.disk_name)}</td><td>${esc(formatBytes(row.bytes))}</td><td>${esc(formatCount(row.parts))}</td><td>${esc(formatCount(row.rows))}</td></tr>`).join('');
+  const eventRows = events.map(row => `<tr><td class="code" title="${esc(row.event)}">${esc(row.event)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
+  const metricRows = metrics.map(row => `<tr><td class="code" title="${esc(row.metric)}">${esc(row.metric)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
+  $('#monitorContent').innerHTML = `
+    <div class="metric-cards">${cards.map(card => `<div class="metric-card"><small>${card[0]}</small><strong title="${esc(card[1])}">${esc(card[1])}</strong></div>`).join('')}</div>
+    <div class="monitor-grid">
+      <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>磁盘容量</strong><span>${disks.length} 个磁盘</span></div><div class="disk-list">${diskHTML}</div></div>
+      <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>最大数据表 / Parts</strong><span>前 ${parts.length} 项 · ${esc(formatBytes(partBytes))}</span></div><div class="table-wrap"><table><thead><tr><th>数据库</th><th>数据表</th><th>磁盘</th><th>空间</th><th>Parts</th><th>行数</th></tr></thead><tbody>${partsRows}</tbody></table></div></div>
+      <div class="panel monitor-panel"><div class="panel-title"><strong>累计事件</strong><span>${events.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>事件</th><th>累计值</th></tr></thead><tbody>${eventRows}</tbody></table></div></div>
+      <div class="panel monitor-panel"><div class="panel-title"><strong>实时指标</strong><span>${metrics.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>指标</th><th>当前值</th></tr></thead><tbody>${metricRows}</tbody></table></div></div>
+    </div>`;
+}
+
+$('#refreshMonitor').onclick = () => loadMonitor(true);
+
 function quoteIdentifier(input) { return `\`${String(input).replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\``; }
 function sqlLiteral(input) { return `'${String(input).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`; }
 function esc(input) { return String(input ?? '').replace(/[&<>'"]/g, char => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[char])); }
 function value(input) { return typeof input === 'object' && input !== null ? JSON.stringify(input) : String(input ?? 'NULL'); }
+function number(input) { const parsed = Number(input); return Number.isFinite(parsed) ? parsed : 0; }
+function formatCount(input) { return number(input).toLocaleString(undefined, {maximumFractionDigits: 2}); }
+function formatDuration(input) {
+  const seconds = Math.max(0, number(input));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor(seconds % 86400 / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  return days ? `${days}天 ${hours}小时` : hours ? `${hours}小时 ${minutes}分` : `${minutes}分`;
+}
 
 function formatBytes(input) {
   if (input === null || input === undefined || input === '') return '—';

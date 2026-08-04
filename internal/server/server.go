@@ -21,13 +21,19 @@ import (
 var webFS embed.FS
 
 type session struct {
-	User    store.PublicUser
-	CSRF    string
-	Expires time.Time
+	User          store.PublicUser
+	CSRF          string
+	ActiveCluster string
+	Expires       time.Time
+}
+type Cluster struct {
+	Alias  string
+	Client *ch.Client
 }
 type Server struct {
 	db         *store.Store
-	ch         *ch.Client
+	clusters   map[string]*ch.Client
+	aliases    []string
 	log        *slog.Logger
 	mu         sync.RWMutex
 	sessions   map[string]session
@@ -35,18 +41,27 @@ type Server struct {
 	cookiePath string
 }
 
-func New(db *store.Store, chc *ch.Client, log *slog.Logger, basePath string) http.Handler {
+func New(db *store.Store, configured []Cluster, log *slog.Logger, basePath string) http.Handler {
+	if len(configured) == 0 {
+		panic("at least one ClickHouse cluster is required")
+	}
 	cookiePath := "/"
 	if basePath != "" {
 		cookiePath = basePath + "/"
 	}
-	s := &Server{db: db, ch: chc, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
+	s := &Server{db: db, clusters: make(map[string]*ch.Client, len(configured)), aliases: make([]string, 0, len(configured)), log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
+	for _, cluster := range configured {
+		s.clusters[cluster.Alias] = cluster.Client
+		s.aliases = append(s.aliases, cluster.Alias)
+	}
 	m := http.NewServeMux()
 	m.HandleFunc("POST /api/login", s.login)
 	m.HandleFunc("POST /api/logout", s.auth(s.logout))
 	m.HandleFunc("GET /api/session", s.auth(s.getSession))
 	m.HandleFunc("GET /api/health", s.auth(s.health))
+	m.HandleFunc("POST /api/cluster", s.auth(s.switchCluster))
 	m.HandleFunc("POST /api/query", s.auth(s.query))
+	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
 	m.HandleFunc("GET /api/users", s.admin(s.users))
 	m.HandleFunc("POST /api/users", s.admin(s.createUser))
 	m.HandleFunc("PATCH /api/users/{id}", s.admin(s.updateUser))
@@ -80,12 +95,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := token()
 	csrf := token()
+	ss := session{User: u, CSRF: csrf, ActiveCluster: s.aliases[0], Expires: time.Now().Add(12 * time.Hour)}
 	s.mu.Lock()
-	s.sessions[sid] = session{User: u, CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
+	s.sessions[sid] = ss
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "ch_session", Value: sid, Path: s.cookiePath, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", MaxAge: 43200})
-	s.db.AddAudit(store.Audit{User: u.Username, Action: "login", Status: "ok", RemoteAddr: remote(r)})
-	writeJSON(w, 200, map[string]any{"user": u, "csrf": csrf})
+	s.db.AddAudit(store.Audit{User: u.Username, Cluster: ss.ActiveCluster, Action: "login", Status: "ok", RemoteAddr: remote(r)})
+	writeJSON(w, 200, s.sessionResponse(ss))
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	sid, _ := r.Cookie("ch_session")
@@ -99,15 +115,49 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
-	writeJSON(w, 200, map[string]any{"user": ss.User, "csrf": ss.CSRF})
+	writeJSON(w, 200, s.sessionResponse(ss))
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	err := s.ch.Ping(r.Context())
+	ss, _ := getSession(r)
+	client := s.clusters[ss.ActiveCluster]
+	err := client.Ping(r.Context())
 	if err != nil {
 		writeJSON(w, 503, map[string]any{"status": "down", "error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]string{"status": "ok"})
+	writeJSON(w, 200, map[string]string{"status": "ok", "cluster": ss.ActiveCluster})
+}
+func (s *Server) switchCluster(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	var in struct {
+		Alias        string `json:"alias"`
+		ConfirmAlias string `json:"confirm_alias"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Alias == "" || in.ConfirmAlias != in.Alias {
+		writeErr(w, 400, "cluster switch confirmation does not match")
+		return
+	}
+	if _, ok := s.clusters[in.Alias]; !ok {
+		writeErr(w, 404, "cluster not found")
+		return
+	}
+	cookie, _ := r.Cookie("ch_session")
+	s.mu.Lock()
+	updated, ok := s.sessions[cookie.Value]
+	if ok {
+		updated.ActiveCluster = in.Alias
+		s.sessions[cookie.Value] = updated
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeErr(w, 401, "session expired")
+		return
+	}
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: in.Alias, Action: "cluster.switch", Statement: ss.ActiveCluster + " -> " + in.Alias, Status: "ok", RemoteAddr: remote(r)})
+	writeJSON(w, 200, s.sessionResponse(updated))
 }
 func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
@@ -131,8 +181,8 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	res, err := s.ch.Execute(r.Context(), in.SQL)
-	a := store.Audit{User: ss.User.Username, Action: kind, Statement: truncate(in.SQL, 2000), DurationMS: time.Since(start).Milliseconds(), RemoteAddr: remote(r), Status: "ok"}
+	res, err := s.clusters[ss.ActiveCluster].Execute(r.Context(), in.SQL)
+	a := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: kind, Statement: truncate(in.SQL, 2000), DurationMS: time.Since(start).Milliseconds(), RemoteAddr: remote(r), Status: "ok"}
 	if err != nil {
 		a.Status = "error"
 		a.Error = truncate(err.Error(), 1000)
@@ -143,6 +193,16 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	a.Rows = res.Rows
 	s.db.AddAudit(a)
 	writeJSON(w, 200, res)
+}
+func (s *Server) monitor(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	snapshot, err := s.clusters[ss.ActiveCluster].Monitor(r.Context())
+	if err != nil {
+		writeErr(w, 502, err.Error())
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]any{"cluster": ss.ActiveCluster, "snapshot": snapshot})
 }
 func (s *Server) users(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, s.db.Users()) }
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +216,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	s.db.AddAudit(store.Audit{User: ss.User.Username, Action: "user.create", Statement: u.Username + " (" + u.Role + ")", Status: "ok", RemoteAddr: remote(r)})
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "user.create", Statement: u.Username + " (" + u.Role + ")", Status: "ok", RemoteAddr: remote(r)})
 	writeJSON(w, 201, u)
 }
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
@@ -177,12 +237,19 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	s.db.AddAudit(store.Audit{User: ss.User.Username, Action: "user.update", Statement: u.Username + " (" + u.Role + ")", Status: "ok", RemoteAddr: remote(r)})
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "user.update", Statement: u.Username + " (" + u.Role + ")", Status: "ok", RemoteAddr: remote(r)})
 	writeJSON(w, 200, u)
 }
 func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	writeJSON(w, 200, s.db.Audits(n))
+}
+func (s *Server) sessionResponse(ss session) map[string]any {
+	clusters := make([]map[string]string, 0, len(s.aliases))
+	for _, alias := range s.aliases {
+		clusters = append(clusters, map[string]string{"alias": alias})
+	}
+	return map[string]any{"user": ss.User, "csrf": ss.CSRF, "clusters": clusters, "active_cluster": ss.ActiveCluster}
 }
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,6 +28,55 @@ func TestClassify(t *testing.T) {
 		if _, err := Classify(sql); err == nil {
 			t.Fatalf("Classify(%q) should fail", sql)
 		}
+	}
+}
+
+func TestMonitorCollectsExporterMetricSources(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		w.Header().Set("Content-Type", "application/json")
+		var response, kind string
+		switch {
+		case strings.Contains(query, "system.asynchronous_metrics"):
+			kind = "async"
+			response = `{"data":[{"metric":"Uptime","value":3600}],"rows":1}`
+		case strings.Contains(query, "system.metrics"):
+			kind = "metrics"
+			response = `{"data":[{"metric":"Query","value":2}],"rows":1}`
+		case strings.Contains(query, "system.events"):
+			kind = "events"
+			response = `{"data":[{"event":"Query","value":100}],"rows":1}`
+		case strings.Contains(query, "system.parts"):
+			kind = "parts"
+			response = `{"data":[{"database":"default","table":"events","disk_name":"default","bytes":1024,"parts":1,"rows":10}],"rows":1}`
+		case strings.Contains(query, "system.disks"):
+			kind = "disks"
+			response = `{"data":[{"name":"default","free_space_in_bytes":1024,"total_space_in_bytes":2048}],"rows":1}`
+		default:
+			t.Errorf("unexpected monitoring query: %s", query)
+			response = `{"data":[],"rows":0}`
+		}
+		mu.Lock()
+		seen[kind] = true
+		mu.Unlock()
+		_, _ = io.WriteString(w, response)
+	}))
+	defer ts.Close()
+	client := New(ts.URL, "", "", "default", 1000, time.Second)
+	snapshot, err := client.Monitor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Metrics) != 1 || len(snapshot.Async) != 1 || len(snapshot.Events) != 1 || len(snapshot.Parts) != 1 || len(snapshot.Disks) != 1 {
+		t.Fatalf("unexpected monitoring snapshot: %#v", snapshot)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 5 {
+		t.Fatalf("monitoring queries seen: %#v", seen)
 	}
 }
 
