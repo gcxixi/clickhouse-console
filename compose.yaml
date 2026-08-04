@@ -16,6 +16,7 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       CH_CONSOLE_CLUSTERS: ${CH_CONSOLE_CLUSTERS:-}
+      CH_CONSOLE_ENCRYPTION_KEY: ${CH_CONSOLE_ENCRYPTION_KEY:-}
       CLICKHOUSE_ALIAS: ${CLICKHOUSE_ALIAS:-default}
       CLICKHOUSE_URL: ${CLICKHOUSE_URL:-http://host.docker.internal:8123}
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}

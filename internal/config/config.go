@@ -24,6 +24,7 @@ type Config struct {
 	Listen, DataDir, BasePath string
 	Clusters                  []Cluster
 	AdminUser, AdminPassword  string
+	EncryptionKey             string
 	QueryTimeout              time.Duration
 	MaxRows                   int
 }
@@ -35,6 +36,7 @@ func Load() (Config, error) {
 		Listen: env("CH_CONSOLE_LISTEN", ":8080"), DataDir: env("CH_CONSOLE_DATA_DIR", "./data"),
 		BasePath:  os.Getenv("CH_CONSOLE_BASE_PATH"),
 		AdminUser: env("CH_CONSOLE_ADMIN_USER", "admin"), AdminPassword: os.Getenv("CH_CONSOLE_ADMIN_PASSWORD"),
+		EncryptionKey: os.Getenv("CH_CONSOLE_ENCRYPTION_KEY"),
 	}
 	var err error
 	c.BasePath, err = normalizeBasePath(c.BasePath)
