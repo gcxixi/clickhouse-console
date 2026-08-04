@@ -7,7 +7,7 @@
 - SQL 工作台：查询结果表格、执行耗时、错误反馈、快捷键执行
 - DDL / DML：按角色控制执行权限
 - 对象浏览器：查看数据库、表、引擎、行数和磁盘空间占用
-- 多集群：为多个 ClickHouse 地址配置唯一别名，在侧边栏二次确认后按会话切换
+- 多集群：支持环境变量和管理员页面配置多个 ClickHouse 地址，在侧边栏二次确认后按会话切换
 - 运行监控：查看实时指标、异步指标、累计事件、活动 Parts 和磁盘容量，并提供一小时浏览器缓存与强制刷新
 - 控制台用户：创建、启用和停用用户，支持 `viewer`、`editor`、`admin`
 - 审计日志：记录登录、查询、DDL/DML 和用户管理操作
@@ -61,6 +61,7 @@ docker run --rm --user 0:0 \
 | `CH_CONSOLE_DATA_DIR` | `./data` | 用户和审计数据目录 |
 | `CH_CONSOLE_BASE_PATH` | 空 | 反向代理路径前缀，例如 `/clickhouse` |
 | `CH_CONSOLE_CLUSTERS` | 空 | 多集群 JSON 数组；设置后替代下方单集群 `CLICKHOUSE_*` 配置 |
+| `CH_CONSOLE_ENCRYPTION_KEY` | 自动生成 | 平台集群凭据的 AES-256-GCM 主密钥，必须是 Base64 编码的 32 字节 |
 | `CLICKHOUSE_ALIAS` | `default` | 单集群模式的唯一别名 |
 | `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | ClickHouse HTTP 地址 |
 | `CLICKHOUSE_USER` | `default` | ClickHouse 用户 |
@@ -83,6 +84,10 @@ CH_CONSOLE_CLUSTERS='[
 ```
 
 别名只能包含字母、数字、点、下划线和连字符，最长 64 个字符。请把真实密码放在部署环境或密钥管理系统中，不要提交 `.env`。未设置 `CH_CONSOLE_CLUSTERS` 时，原有 `CLICKHOUSE_URL`、`CLICKHOUSE_USER`、`CLICKHOUSE_PASSWORD` 和 `CLICKHOUSE_DATABASE` 配置继续有效。
+
+管理员还可以从“集群管理”页面新增和维护集群。环境变量集群会显示为只读，平台集群保存在数据目录的 `platform-clusters.json` 中。ClickHouse 用户名和密码不会出现在 API 响应或明文数据文件中：浏览器使用一次性 AES-GCM 密钥加密凭据，并通过服务端临时 RSA-OAEP 公钥封装该密钥；服务端解密后，再使用持久化 AES-256-GCM 主密钥加密保存。
+
+未设置 `CH_CONSOLE_ENCRYPTION_KEY` 时，程序会在数据目录生成权限为 `0600` 的 `cluster-encryption.key`。生产环境可以使用 `openssl rand -base64 32` 生成稳定密钥并通过密钥管理系统注入。必须备份该密钥；密钥丢失后，已有平台集群凭据无法恢复。应用层凭据封装不能替代 HTTPS，因为明文 HTTP 下的公钥仍可能被中间人替换；非 localhost 部署必须使用 TLS 反向代理。
 
 监控页参考 [clickhouse_exporter 的采集方式](https://github.com/ClickHouse/clickhouse_exporter/blob/master/exporter/exporter.go)，读取 `system.metrics`、`system.asynchronous_metrics`、`system.events`、`system.parts` 和 `system.disks`。监控快照按集群别名保存在浏览器 `localStorage`：一小时内优先使用缓存；超过一小时会先展示带时间标识的旧数据，再在后台刷新。页面的刷新按钮始终会强制获取最新数据。
 

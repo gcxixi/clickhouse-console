@@ -1,19 +1,28 @@
 package server
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
+	"github.com/gcxixi/clickhouse-console/internal/clusterconfig"
 	"github.com/gcxixi/clickhouse-console/internal/store"
 )
 
@@ -27,21 +36,27 @@ type session struct {
 	Expires       time.Time
 }
 type Cluster struct {
-	Alias  string
-	Client *ch.Client
+	ID, Alias, URL, Database, Source string
+	Client                           *ch.Client
 }
 type Server struct {
 	db         *store.Store
-	clusters   map[string]*ch.Client
+	platform   *clusterconfig.Store
+	clusters   map[string]Cluster
 	aliases    []string
+	maxRows    int
+	timeout    time.Duration
 	log        *slog.Logger
 	mu         sync.RWMutex
 	sessions   map[string]session
 	basePath   string
 	cookiePath string
+	keyOnce    sync.Once
+	key        *rsa.PrivateKey
+	keyErr     error
 }
 
-func New(db *store.Store, configured []Cluster, log *slog.Logger, basePath string) http.Handler {
+func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string) http.Handler {
 	if len(configured) == 0 {
 		panic("at least one ClickHouse cluster is required")
 	}
@@ -49,9 +64,9 @@ func New(db *store.Store, configured []Cluster, log *slog.Logger, basePath strin
 	if basePath != "" {
 		cookiePath = basePath + "/"
 	}
-	s := &Server{db: db, clusters: make(map[string]*ch.Client, len(configured)), aliases: make([]string, 0, len(configured)), log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
+	s := &Server{db: db, platform: platform, clusters: make(map[string]Cluster, len(configured)), aliases: make([]string, 0, len(configured)), maxRows: maxRows, timeout: timeout, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
 	for _, cluster := range configured {
-		s.clusters[cluster.Alias] = cluster.Client
+		s.clusters[cluster.Alias] = cluster
 		s.aliases = append(s.aliases, cluster.Alias)
 	}
 	m := http.NewServeMux()
@@ -62,6 +77,11 @@ func New(db *store.Store, configured []Cluster, log *slog.Logger, basePath strin
 	m.HandleFunc("POST /api/cluster", s.auth(s.switchCluster))
 	m.HandleFunc("POST /api/query", s.auth(s.query))
 	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
+	m.HandleFunc("GET /api/clusters", s.admin(s.listClusters))
+	m.HandleFunc("GET /api/clusters/transport-key", s.admin(s.transportKey))
+	m.HandleFunc("POST /api/clusters", s.admin(s.createCluster))
+	m.HandleFunc("PUT /api/clusters/{id}", s.admin(s.updateCluster))
+	m.HandleFunc("DELETE /api/clusters/{id}", s.admin(s.deleteCluster))
 	m.HandleFunc("GET /api/users", s.admin(s.users))
 	m.HandleFunc("POST /api/users", s.admin(s.createUser))
 	m.HandleFunc("PATCH /api/users/{id}", s.admin(s.updateUser))
@@ -95,7 +115,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := token()
 	csrf := token()
-	ss := session{User: u, CSRF: csrf, ActiveCluster: s.aliases[0], Expires: time.Now().Add(12 * time.Hour)}
+	aliases := s.clusterAliases()
+	ss := session{User: u, CSRF: csrf, ActiveCluster: aliases[0], Expires: time.Now().Add(12 * time.Hour)}
 	s.mu.Lock()
 	s.sessions[sid] = ss
 	s.mu.Unlock()
@@ -119,7 +140,11 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
-	client := s.clusters[ss.ActiveCluster]
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
 	err := client.Ping(r.Context())
 	if err != nil {
 		writeJSON(w, 503, map[string]any{"status": "down", "error": err.Error()})
@@ -140,12 +165,13 @@ func (s *Server) switchCluster(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "cluster switch confirmation does not match")
 		return
 	}
-	if _, ok := s.clusters[in.Alias]; !ok {
+	cookie, _ := r.Cookie("ch_session")
+	s.mu.Lock()
+	if _, exists := s.clusters[in.Alias]; !exists {
+		s.mu.Unlock()
 		writeErr(w, 404, "cluster not found")
 		return
 	}
-	cookie, _ := r.Cookie("ch_session")
-	s.mu.Lock()
 	updated, ok := s.sessions[cookie.Value]
 	if ok {
 		updated.ActiveCluster = in.Alias
@@ -181,7 +207,12 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	res, err := s.clusters[ss.ActiveCluster].Execute(r.Context(), in.SQL)
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	res, err := client.Execute(r.Context(), in.SQL)
 	a := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: kind, Statement: truncate(in.SQL, 2000), DurationMS: time.Since(start).Milliseconds(), RemoteAddr: remote(r), Status: "ok"}
 	if err != nil {
 		a.Status = "error"
@@ -196,13 +227,244 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) monitor(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
-	snapshot, err := s.clusters[ss.ActiveCluster].Monitor(r.Context())
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	snapshot, err := client.Monitor(r.Context())
 	if err != nil {
 		writeErr(w, 502, err.Error())
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, map[string]any{"cluster": ss.ActiveCluster, "snapshot": snapshot})
+}
+
+type credentialEnvelope struct {
+	Key        string `json:"key"`
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+type clusterRequest struct {
+	Alias             string             `json:"alias"`
+	URL               string             `json:"url"`
+	Database          string             `json:"database"`
+	UpdateCredentials bool               `json:"update_credentials"`
+	Credentials       credentialEnvelope `json:"credentials"`
+}
+
+func (s *Server) listClusters(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	items := make([]map[string]any, 0, len(s.aliases))
+	for _, alias := range s.aliases {
+		items = append(items, clusterJSON(s.clusters[alias]))
+	}
+	s.mu.RUnlock()
+	writeJSON(w, 200, items)
+}
+
+func (s *Server) transportKey(w http.ResponseWriter, r *http.Request) {
+	key, err := s.transportPrivateKey()
+	if err != nil {
+		writeErr(w, 500, "unable to initialize credential encryption")
+		return
+	}
+	exponent := key.PublicKey.E
+	exponentBytes := []byte{byte(exponent >> 16), byte(exponent >> 8), byte(exponent)}
+	for len(exponentBytes) > 1 && exponentBytes[0] == 0 {
+		exponentBytes = exponentBytes[1:]
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, 200, map[string]string{
+		"kty": "RSA", "alg": "RSA-OAEP-256", "use": "enc",
+		"n": base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(exponentBytes),
+	})
+}
+
+func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	var in clusterRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	user, password, err := s.decryptCredentials(in.Credentials)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.mu.Lock()
+	for alias := range s.clusters {
+		if strings.EqualFold(alias, strings.TrimSpace(in.Alias)) {
+			s.mu.Unlock()
+			writeErr(w, 400, "cluster alias already exists")
+			return
+		}
+	}
+	created, err := s.platform.Create(clusterconfig.Input{Alias: in.Alias, URL: in.URL, Database: in.Database, User: user, Password: password})
+	if err == nil {
+		cluster := Cluster{ID: created.ID, Alias: created.Alias, URL: created.URL, Database: created.Database, Source: "platform", Client: ch.New(created.URL, user, password, created.Database, s.maxRows, s.timeout)}
+		s.clusters[created.Alias] = cluster
+		s.aliases = append(s.aliases, created.Alias)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: created.Alias, Action: "cluster.create", Statement: created.Alias, Status: "ok", RemoteAddr: remote(r)})
+	writeJSON(w, 201, map[string]any{"cluster": publicClusterJSON(created), "aliases": s.clusterAliases()})
+}
+
+func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	var in clusterRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	user, password := "", ""
+	var err error
+	if in.UpdateCredentials {
+		user, password, err = s.decryptCredentials(in.Credentials)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	s.mu.Lock()
+	var current Cluster
+	for _, cluster := range s.clusters {
+		if cluster.ID == r.PathValue("id") && cluster.Source == "platform" {
+			current = cluster
+			break
+		}
+	}
+	if current.ID == "" {
+		s.mu.Unlock()
+		writeErr(w, 404, "platform cluster not found")
+		return
+	}
+	updated, config, err := s.platform.Update(current.ID, clusterconfig.Input{Alias: current.Alias, URL: in.URL, Database: in.Database, User: user, Password: password}, in.UpdateCredentials)
+	if err == nil {
+		s.clusters[current.Alias] = Cluster{ID: updated.ID, Alias: updated.Alias, URL: updated.URL, Database: updated.Database, Source: "platform", Client: ch.New(updated.URL, config.User, config.Password, updated.Database, s.maxRows, s.timeout)}
+	}
+	s.mu.Unlock()
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: updated.Alias, Action: "cluster.update", Statement: updated.Alias, Status: "ok", RemoteAddr: remote(r)})
+	writeJSON(w, 200, map[string]any{"cluster": publicClusterJSON(updated)})
+}
+
+func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	s.mu.Lock()
+	var target Cluster
+	for _, cluster := range s.clusters {
+		if cluster.ID == r.PathValue("id") && cluster.Source == "platform" {
+			target = cluster
+			break
+		}
+	}
+	if target.ID == "" {
+		s.mu.Unlock()
+		writeErr(w, 404, "platform cluster not found")
+		return
+	}
+	for _, active := range s.sessions {
+		if active.ActiveCluster == target.Alias {
+			s.mu.Unlock()
+			writeErr(w, 409, "cluster is active in a user session and cannot be deleted")
+			return
+		}
+	}
+	if err := s.platform.Delete(target.ID); err != nil {
+		s.mu.Unlock()
+		writeErr(w, 400, err.Error())
+		return
+	}
+	delete(s.clusters, target.Alias)
+	for i, alias := range s.aliases {
+		if alias == target.Alias {
+			s.aliases = append(s.aliases[:i], s.aliases[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+	s.db.AddAudit(store.Audit{User: ss.User.Username, Cluster: target.Alias, Action: "cluster.delete", Statement: target.Alias, Status: "ok", RemoteAddr: remote(r)})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) transportPrivateKey() (*rsa.PrivateKey, error) {
+	s.keyOnce.Do(func() { s.key, s.keyErr = rsa.GenerateKey(rand.Reader, 2048) })
+	return s.key, s.keyErr
+}
+
+func (s *Server) decryptCredentials(envelope credentialEnvelope) (string, string, error) {
+	key, err := s.transportPrivateKey()
+	if err != nil {
+		return "", "", errors.New("credential encryption is unavailable")
+	}
+	wrapped, err := base64.StdEncoding.DecodeString(envelope.Key)
+	if err != nil || len(wrapped) > 512 {
+		return "", "", errors.New("invalid encrypted credential key")
+	}
+	aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, key, wrapped, nil)
+	if err != nil || len(aesKey) != 32 {
+		return "", "", errors.New("unable to decrypt credentials")
+	}
+	defer clear(aesKey)
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return "", "", errors.New("unable to decrypt credentials")
+	}
+	var aead cipher.AEAD
+	if aead, err = cipher.NewGCM(block); err != nil {
+		return "", "", errors.New("unable to decrypt credentials")
+	}
+	nonce, nonceErr := base64.StdEncoding.DecodeString(envelope.Nonce)
+	ciphertext, cipherErr := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if nonceErr != nil || cipherErr != nil || len(nonce) != aead.NonceSize() || len(ciphertext) > 4096 {
+		return "", "", errors.New("invalid encrypted credentials")
+	}
+	plain, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", "", errors.New("unable to decrypt credentials")
+	}
+	defer clear(plain)
+	var credentials struct {
+		User     string `json:"user"`
+		Password string `json:"password"`
+	}
+	if err = json.Unmarshal(plain, &credentials); err != nil || strings.TrimSpace(credentials.User) == "" {
+		return "", "", errors.New("invalid credential payload")
+	}
+	return credentials.User, credentials.Password, nil
+}
+
+func clusterJSON(cluster Cluster) map[string]any {
+	return map[string]any{"id": cluster.ID, "alias": cluster.Alias, "url": publicClusterURL(cluster.URL), "database": cluster.Database, "source": cluster.Source, "credentials_configured": true}
+}
+
+func publicClusterJSON(cluster clusterconfig.Public) map[string]any {
+	return map[string]any{"id": cluster.ID, "alias": cluster.Alias, "url": cluster.URL, "database": cluster.Database, "source": "platform", "credentials_configured": cluster.CredentialsConfigured, "created_at": cluster.CreatedAt, "updated_at": cluster.UpdatedAt}
+}
+
+func publicClusterURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "invalid endpoint"
+	}
+	parsed.User = nil
+	query := parsed.Query()
+	for _, key := range []string{"password", "user", "key"} {
+		query.Del(key)
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 func (s *Server) users(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, s.db.Users()) }
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -245,11 +507,25 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.db.Audits(n))
 }
 func (s *Server) sessionResponse(ss session) map[string]any {
-	clusters := make([]map[string]string, 0, len(s.aliases))
-	for _, alias := range s.aliases {
+	aliases := s.clusterAliases()
+	clusters := make([]map[string]string, 0, len(aliases))
+	for _, alias := range aliases {
 		clusters = append(clusters, map[string]string{"alias": alias})
 	}
 	return map[string]any{"user": ss.User, "csrf": ss.CSRF, "clusters": clusters, "active_cluster": ss.ActiveCluster}
+}
+
+func (s *Server) clusterClient(alias string) (*ch.Client, bool) {
+	s.mu.RLock()
+	cluster, ok := s.clusters[alias]
+	s.mu.RUnlock()
+	return cluster.Client, ok
+}
+
+func (s *Server) clusterAliases() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.aliases...)
 }
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

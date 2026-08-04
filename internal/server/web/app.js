@@ -3,7 +3,7 @@ const $$ = selector => document.querySelectorAll(selector);
 const apiRoot = new URL('api/', document.baseURI);
 const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
 const monitorCacheTTL = 60 * 60 * 1000;
-let state = {csrf: '', user: null, clusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
+let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
 
 async function api(path, opts = {}) {
   opts.headers = {...(opts.headers || {})};
@@ -55,7 +55,7 @@ $('#loginForm').addEventListener('submit', async event => {
 $('#logout').onclick = async () => {
   try { await api('/api/logout', {method: 'POST'}); }
   finally {
-    state = {csrf: '', user: null, clusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
+    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
     showLogin();
   }
 };
@@ -64,6 +64,7 @@ const views = {
   query: ['SQL 工作台', '查询并管理 ClickHouse 数据'],
   schema: ['对象浏览器', '浏览数据库和数据表'],
   monitor: ['运行监控', '查看当前 ClickHouse 集群运行状态'],
+  clusters: ['集群管理', '安全配置 ClickHouse 连接'],
   users: ['用户管理', '管理控制台账号与角色'],
   audit: ['审计日志', '追踪关键操作与执行结果']
 };
@@ -77,6 +78,7 @@ function activateView(view) {
   $('#subtitle').textContent = views[view][1];
   if (view === 'schema') loadDatabases();
   if (view === 'monitor') loadMonitor();
+  if (view === 'clusters') loadManagedClusters();
   if (view === 'users') loadUsers();
   if (view === 'audit') loadAudit();
 }
@@ -389,6 +391,124 @@ async function copyText(text) {
 
 $('#refreshSchema').onclick = loadDatabases;
 
+async function loadManagedClusters() {
+  try {
+    state.managedClusters = await api('/api/clusters');
+    $('#clusterRows').innerHTML = state.managedClusters.map(cluster => `<tr><td><strong>${esc(cluster.alias)}</strong></td><td><span class="tag">${cluster.source === 'platform' ? '平台' : '环境变量'}</span></td><td class="code" title="${esc(cluster.url)}">${esc(cluster.url)}</td><td>${esc(cluster.database)}</td><td><span class="tag ok">已加密配置</span></td><td>${cluster.source === 'platform' ? `<div class="row-actions"><button class="ghost edit-cluster" data-id="${esc(cluster.id)}">编辑</button><button class="ghost delete-cluster" data-id="${esc(cluster.id)}">删除</button></div>` : '<span class="muted">只读</span>'}</td></tr>`).join('');
+    $$('.edit-cluster').forEach(button => button.onclick = () => openClusterEditor(button.dataset.id));
+    $$('.delete-cluster').forEach(button => button.onclick = () => deleteManagedCluster(button.dataset.id));
+  } catch (error) { toast(error.message); }
+}
+
+function configureCredentialFields(enabled, required) {
+  $('#credentialFields').classList.toggle('hidden', !enabled);
+  const user = $('#clusterManageForm').elements.clusterUser;
+  user.required = required;
+  if (!enabled) {
+    user.value = '';
+    $('#clusterManageForm').elements.clusterPassword.value = '';
+  }
+}
+
+$('#newCluster').onclick = () => {
+  const form = $('#clusterManageForm');
+  form.reset();
+  form.elements.id.value = '';
+  form.elements.alias.disabled = false;
+  form.elements.database.value = 'default';
+  $('#clusterManageTitle').textContent = '添加集群';
+  $('#updateCredentialsLabel').classList.add('hidden');
+  configureCredentialFields(true, true);
+  $('#clusterManageError').textContent = '';
+  $('#clusterManageDialog').showModal();
+};
+
+function openClusterEditor(id) {
+  const cluster = state.managedClusters.find(item => item.id === id && item.source === 'platform');
+  if (!cluster) return;
+  const form = $('#clusterManageForm');
+  form.reset();
+  form.elements.id.value = cluster.id;
+  form.elements.alias.value = cluster.alias;
+  form.elements.alias.disabled = true;
+  form.elements.url.value = cluster.url;
+  form.elements.database.value = cluster.database;
+  $('#clusterManageTitle').textContent = `编辑 ${cluster.alias}`;
+  $('#updateCredentialsLabel').classList.remove('hidden');
+  $('#updateCredentials').checked = false;
+  configureCredentialFields(false, false);
+  $('#clusterManageError').textContent = '';
+  $('#clusterManageDialog').showModal();
+}
+
+$('#updateCredentials').onchange = event => configureCredentialFields(event.target.checked, event.target.checked);
+$$('.close-cluster-manage').forEach(button => button.onclick = () => {
+  $('#clusterManageForm').reset();
+  $('#clusterManageDialog').close();
+});
+
+async function encryptClusterCredentials(user, password) {
+  if (!globalThis.crypto?.subtle || !globalThis.isSecureContext) throw new Error('凭据加密需要 HTTPS 或 localhost 安全上下文');
+  const jwk = await api('/api/clusters/transport-key');
+  const publicKey = await crypto.subtle.importKey('jwk', jwk, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
+  const aesKey = await crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt']);
+  const rawKey = await crypto.subtle.exportKey('raw', aesKey);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify({user, password}));
+  const ciphertext = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, aesKey, plaintext);
+  const wrappedKey = await crypto.subtle.encrypt({name: 'RSA-OAEP'}, publicKey, rawKey);
+  return {key: base64(wrappedKey), nonce: base64(nonce), ciphertext: base64(ciphertext)};
+}
+
+function base64(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+$('#clusterManageForm').onsubmit = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = form.elements.id.value;
+  const updateCredentials = !id || $('#updateCredentials').checked;
+  const submit = $('#saveCluster');
+  submit.disabled = true;
+  submit.textContent = '加密并保存…';
+  $('#clusterManageError').textContent = '';
+  try {
+    const credentials = updateCredentials ? await encryptClusterCredentials(form.elements.clusterUser.value.trim(), form.elements.clusterPassword.value) : {key: '', nonce: '', ciphertext: ''};
+    const payload = {alias: form.elements.alias.value, url: form.elements.url.value, database: form.elements.database.value, update_credentials: updateCredentials, credentials};
+    await api(id ? `/api/clusters/${encodeURIComponent(id)}` : '/api/clusters', {method: id ? 'PUT' : 'POST', body: JSON.stringify(payload)});
+    form.reset();
+    $('#clusterManageDialog').close();
+    const session = await api('/api/session');
+    state.clusters = session.clusters;
+    state.activeCluster = session.active_cluster;
+    renderClusterSelector();
+    await loadManagedClusters();
+    toast(id ? '集群配置已更新' : '集群已添加');
+  } catch (error) { $('#clusterManageError').textContent = error.message; }
+  finally {
+    form.elements.clusterPassword.value = '';
+    submit.disabled = false;
+    submit.textContent = '保存';
+  }
+};
+
+async function deleteManagedCluster(id) {
+  const cluster = state.managedClusters.find(item => item.id === id && item.source === 'platform');
+  if (!cluster || !confirm(`确认删除平台集群 ${cluster.alias}？`)) return;
+  try {
+    await api(`/api/clusters/${encodeURIComponent(id)}`, {method: 'DELETE'});
+    const session = await api('/api/session');
+    state.clusters = session.clusters;
+    renderClusterSelector();
+    await loadManagedClusters();
+    toast('集群已删除');
+  } catch (error) { toast(error.message); }
+}
+
 async function loadUsers() {
   try {
     const users = await api('/api/users');
@@ -482,30 +602,26 @@ function renderMonitor(snapshot, cached, recordedAt) {
   const parts = snapshot.parts || [];
   const partBytes = parts.reduce((sum, row) => sum + number(row.bytes), 0);
   const partCount = parts.reduce((sum, row) => sum + number(row.parts), 0);
+  const disks = snapshot.disks || [];
+  const diskTotal = disks.reduce((sum, row) => sum + number(row.total_space_in_bytes), 0);
+  const diskFree = disks.reduce((sum, row) => sum + number(row.free_space_in_bytes), 0);
+  const diskUsed = Math.max(0, diskTotal - diskFree);
   const cards = [
+    ['磁盘占用', `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}`],
     ['运行查询', formatCount(metricMap.get('Query'))],
     ['后台合并', formatCount(metricMap.get('Merge'))],
     ['内存占用', formatBytes(metricMap.get('MemoryTracking'))],
     ['运行时间', formatDuration(metricMap.get('Uptime'))],
     ['活动数据分区', formatCount(partCount)]
   ];
-  const disks = snapshot.disks || [];
   const events = [...(snapshot.events || [])].sort((a, b) => number(b.value) - number(a.value));
-  const diskHTML = disks.length ? disks.map(row => {
-    const total = number(row.total_space_in_bytes);
-    const free = number(row.free_space_in_bytes);
-    const used = Math.max(0, total - free);
-    const percent = total > 0 ? Math.min(100, used / total * 100) : 0;
-    return `<div class="disk-row"><strong>${esc(row.name)}</strong><div class="capacity-track" title="已使用 ${esc(formatBytes(used))}"><i style="width:${percent.toFixed(1)}%"></i></div><small>${esc(formatBytes(used))} / ${esc(formatBytes(total))} · ${percent.toFixed(1)}%</small></div>`;
-  }).join('') : '<div class="empty">暂无磁盘数据</div>';
   const partsRows = parts.map(row => `<tr><td>${esc(row.database)}</td><td class="code" title="${esc(row.table)}">${esc(row.table)}</td><td>${esc(row.disk_name)}</td><td>${esc(formatBytes(row.bytes))}</td><td>${esc(formatCount(row.parts))}</td><td>${esc(formatCount(row.rows))}</td></tr>`).join('');
   const eventRows = events.map(row => `<tr><td class="code" title="${esc(row.event)}">${esc(row.event)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
   const metricRows = metrics.map(row => `<tr><td class="code" title="${esc(row.metric)}">${esc(row.metric)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
   $('#monitorContent').innerHTML = `
     <div class="metric-cards">${cards.map(card => `<div class="metric-card"><small>${card[0]}</small><strong title="${esc(card[1])}">${esc(card[1])}</strong></div>`).join('')}</div>
     <div class="monitor-grid">
-      <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>磁盘容量</strong><span>${disks.length} 个磁盘</span></div><div class="disk-list">${diskHTML}</div></div>
-      <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>最大数据表 / Parts</strong><span>前 ${parts.length} 项 · ${esc(formatBytes(partBytes))}</span></div><div class="table-wrap"><table><thead><tr><th>数据库</th><th>数据表</th><th>磁盘</th><th>空间</th><th>Parts</th><th>行数</th></tr></thead><tbody>${partsRows}</tbody></table></div></div>
+      <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>最大数据表 / Parts</strong><span>前 ${parts.length} 项 · ${esc(formatBytes(partBytes))} · ${disks.length} 个磁盘</span></div><div class="table-wrap"><table><thead><tr><th>数据库</th><th>数据表</th><th>磁盘</th><th>空间</th><th>Parts</th><th>行数</th></tr></thead><tbody>${partsRows}</tbody></table></div></div>
       <div class="panel monitor-panel"><div class="panel-title"><strong>累计事件</strong><span>${events.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>事件</th><th>累计值</th></tr></thead><tbody>${eventRows}</tbody></table></div></div>
       <div class="panel monitor-panel"><div class="panel-title"><strong>实时指标</strong><span>${metrics.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>指标</th><th>当前值</th></tr></thead><tbody>${metricRows}</tbody></table></div></div>
     </div>`;

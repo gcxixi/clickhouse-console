@@ -1,9 +1,16 @@
 package server
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +18,7 @@ import (
 	"time"
 
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
+	"github.com/gcxixi/clickhouse-console/internal/clusterconfig"
 	"github.com/gcxixi/clickhouse-console/internal/store"
 )
 
@@ -19,7 +27,7 @@ func TestBasePathRoutesAssetsAndScopesCookie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(db, []Cluster{{Alias: "default", Client: nil}}, slog.New(slog.NewTextHandler(io.Discard, nil)), "/clickhouse")
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "/clickhouse")
 
 	request := func(method, target, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -58,12 +66,92 @@ func TestBasePathRoutesAssetsAndScopesCookie(t *testing.T) {
 	}
 }
 
+func TestPlatformClusterCredentialsUseEncryptedEnvelope(t *testing.T) {
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := testPlatformStore(t)
+	handler := New(db, platform, []Cluster{{Alias: "default", URL: "http://env-user:env-pass@default:8123?password=hidden&keep=1", Database: "default", Source: "environment"}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	request := func(method, target string, body []byte, csrf string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(string(body)))
+		if len(body) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		return recorder
+	}
+	login := request(http.MethodPost, "/api/login", []byte(`{"username":"admin","password":"test-password-123"}`), "", nil)
+	var loginData struct {
+		CSRF string `json:"csrf"`
+	}
+	if login.Code != http.StatusOK || json.Unmarshal(login.Body.Bytes(), &loginData) != nil {
+		t.Fatalf("login failed: %d %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	keyResponse := request(http.MethodGet, "/api/clusters/transport-key", nil, "", cookie)
+	var jwk struct{ N, E string }
+	if keyResponse.Code != http.StatusOK || json.Unmarshal(keyResponse.Body.Bytes(), &jwk) != nil {
+		t.Fatalf("transport key failed: %d %s", keyResponse.Code, keyResponse.Body.String())
+	}
+	nBytes, _ := base64.RawURLEncoding.DecodeString(jwk.N)
+	eBytes, _ := base64.RawURLEncoding.DecodeString(jwk.E)
+	exponent := 0
+	for _, value := range eBytes {
+		exponent = exponent<<8 | int(value)
+	}
+	publicKey := &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: exponent}
+	envelope := encryptTestCredentials(t, publicKey, "transport-test-user", "transport-test-password")
+	body, _ := json.Marshal(map[string]any{"alias": "platform", "url": "http://platform:8123", "database": "default", "update_credentials": true, "credentials": envelope})
+	created := request(http.MethodPost, "/api/clusters", body, loginData.CSRF, cookie)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create cluster failed: %d %s", created.Code, created.Body.String())
+	}
+	if strings.Contains(created.Body.String(), "transport-test-user") || strings.Contains(created.Body.String(), "transport-test-password") {
+		t.Fatalf("credential leaked in API response: %s", created.Body.String())
+	}
+	configs, err := platform.Configs()
+	if err != nil || len(configs) != 1 || configs[0].User != "transport-test-user" || configs[0].Password != "transport-test-password" {
+		t.Fatalf("stored config = %#v, %v", configs, err)
+	}
+	listed := request(http.MethodGet, "/api/clusters", nil, "", cookie)
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), "transport-test-user") || strings.Contains(listed.Body.String(), "transport-test-password") || strings.Contains(listed.Body.String(), "env-pass") || strings.Contains(listed.Body.String(), "hidden") {
+		t.Fatalf("credential leaked in list response: %d %s", listed.Code, listed.Body.String())
+	}
+}
+
+func encryptTestCredentials(t *testing.T, publicKey *rsa.PublicKey, user, password string) credentialEnvelope {
+	t.Helper()
+	aesKey := make([]byte, 32)
+	if _, err := rand.Read(aesKey); err != nil {
+		t.Fatal(err)
+	}
+	block, _ := aes.NewCipher(aesKey)
+	aead, _ := cipher.NewGCM(block)
+	nonce := make([]byte, aead.NonceSize())
+	_, _ = rand.Read(nonce)
+	plain, _ := json.Marshal(map[string]string{"user": user, "password": password})
+	ciphertext := aead.Seal(nil, nonce, plain, nil)
+	wrapped, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, publicKey, aesKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return credentialEnvelope{Key: base64.StdEncoding.EncodeToString(wrapped), Nonce: base64.StdEncoding.EncodeToString(nonce), Ciphertext: base64.StdEncoding.EncodeToString(ciphertext)}
+}
+
 func TestRootDeploymentStillWorks(t *testing.T) {
 	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(db, []Cluster{{Alias: "default", Client: nil}}, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if recorder.Code != http.StatusOK {
@@ -86,10 +174,10 @@ func TestSessionClusterSwitchRoutesQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(db, []Cluster{
+	handler := New(db, testPlatformStore(t), []Cluster{
 		{Alias: "alpha", Client: ch.New(alpha.URL, "", "", "default", 100, time.Second)},
 		{Alias: "beta", Client: ch.New(beta.URL, "", "", "default", 100, time.Second)},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
 
 	request := func(method, target, body, csrf string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
@@ -154,4 +242,13 @@ func TestSessionClusterSwitchRoutesQueries(t *testing.T) {
 	if !found {
 		t.Fatal("cluster switch was not audited")
 	}
+}
+
+func testPlatformStore(t *testing.T) *clusterconfig.Store {
+	t.Helper()
+	platform, err := clusterconfig.Open(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return platform
 }
