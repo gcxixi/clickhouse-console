@@ -3,7 +3,7 @@ const $$ = selector => document.querySelectorAll(selector);
 const apiRoot = new URL('api/', document.baseURI);
 const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
 const monitorCacheTTL = 60 * 60 * 1000;
-let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
+let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: ''};
 
 async function api(path, opts = {}) {
   opts.headers = {...(opts.headers || {})};
@@ -55,7 +55,7 @@ $('#loginForm').addEventListener('submit', async event => {
 $('#logout').onclick = async () => {
   try { await api('/api/logout', {method: 'POST'}); }
   finally {
-    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', monitorLoadingCluster: ''};
+    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: ''};
     showLogin();
   }
 };
@@ -198,27 +198,44 @@ async function loadEditorTables(database, preferredTable = '') {
   tableSelect.disabled = false;
   if (preferredTable && tables.includes(preferredTable)) {
     tableSelect.value = preferredTable;
-    stageTableQuery(database, preferredTable);
+    await stageTableQuery(database, preferredTable);
   }
 }
 
-function stageTableQuery(database, table) {
+async function stageTableQuery(database, table) {
   const editor = $('#sql');
   state.selectedDatabase = database;
   state.selectedTable = table;
-  state.suggestedSQL = `SELECT *\nFROM ${quoteIdentifier(database)}.${quoteIdentifier(table)}\nLIMIT 100`;
+  state.suggestedSQL = '';
   editor.value = '';
-  editor.placeholder = state.suggestedSQL;
-  $('#suggestionHint').classList.remove('hidden');
+  editor.placeholder = '正在读取数据表字段…';
+  $('#suggestionHint').classList.add('hidden');
   resetQueryResult();
   editor.focus();
   editor.setSelectionRange(0, 0);
+  try {
+    const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: `SELECT name FROM system.columns WHERE database=${sqlLiteral(database)} AND table=${sqlLiteral(table)} ORDER BY position`})});
+    if (state.selectedDatabase !== database || state.selectedTable !== table) return;
+    const columns = (result.data || []).map(row => String(row.name));
+    if (!columns.length) throw new Error(`未读取到 ${database}.${table} 的字段`);
+    state.suggestedSQL = `SELECT\n${columns.map(column => `    ${quoteIdentifier(column)}`).join(',\n')}\nFROM ${quoteIdentifier(database)}.${quoteIdentifier(table)}\nLIMIT 100`;
+    editor.placeholder = state.suggestedSQL;
+    $('#suggestionHint').classList.remove('hidden');
+  } catch (error) {
+    if (state.selectedDatabase !== database || state.selectedTable !== table) return;
+    clearSuggestedSQL();
+    throw error;
+  }
 }
 
 function resetQueryResult() {
+  state.queryResult = null;
+  state.resultColumnVisibility = [];
   $('#queryStatus').className = 'status hidden';
   $('#queryStatus').textContent = '';
   $('#resultMeta').textContent = '等待执行';
+  $('#resultColumns').className = 'result-column-controls hidden';
+  $('#resultColumns').replaceChildren();
   $('#result').className = 'empty';
   $('#result').textContent = '确认并运行 SQL 后，结果将显示在这里';
 }
@@ -246,9 +263,14 @@ $('#queryDatabase').addEventListener('change', async event => {
   catch (error) { toast(error.message); resetEditorTables(); }
 });
 
-$('#queryTable').addEventListener('change', event => {
-  if (event.target.value) stageTableQuery($('#queryDatabase').value, event.target.value);
-  else clearSuggestedSQL();
+$('#queryTable').addEventListener('change', async event => {
+  if (!event.target.value) {
+    state.selectedTable = '';
+    clearSuggestedSQL();
+    return;
+  }
+  try { await stageTableQuery($('#queryDatabase').value, event.target.value); }
+  catch (error) { toast(error.message); }
 });
 
 $('#sql').addEventListener('input', event => {
@@ -296,15 +318,76 @@ async function runQuery() {
 }
 
 function renderResult(result) {
+  state.queryResult = result;
   if (!result.meta?.length) {
+    state.resultColumnVisibility = [];
+    $('#resultColumns').className = 'result-column-controls hidden';
+    $('#resultColumns').replaceChildren();
     $('#result').className = 'empty';
     $('#result').textContent = '命令执行成功';
     return;
   }
-  const columns = result.meta.map(column => column.name);
-  $('#result').className = 'table-wrap';
-  $('#result').innerHTML = `<table><thead><tr>${result.meta.map(column => `<th title="${esc(column.type)}">${esc(column.name)}</th>`).join('')}</tr></thead><tbody>${(result.data || []).map(row => `<tr>${columns.map(column => { const fullValue = value(row[column]); return `<td class="code" title="${esc(fullValue)}">${esc(fullValue)}</td>`; }).join('')}</tr>`).join('')}</tbody></table>`;
+  state.resultColumnVisibility = readResultColumnVisibility(result.meta);
+  renderResultColumnControls(result.meta);
+  renderResultTable();
 }
+
+function resultColumnPreferenceKey(meta) {
+  const signature = meta.map(column => [String(column.name), String(column.type)]);
+  return `clickhouse-console:${apiRoot.pathname}:result-columns:${JSON.stringify([state.activeCluster, signature])}`;
+}
+
+function readResultColumnVisibility(meta) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(resultColumnPreferenceKey(meta)) || 'null');
+    if (Array.isArray(saved) && saved.length === meta.length && saved.every(item => typeof item === 'boolean')) return saved;
+  } catch {}
+  return meta.map(() => true);
+}
+
+function writeResultColumnVisibility() {
+  if (!state.queryResult?.meta?.length) return;
+  try { localStorage.setItem(resultColumnPreferenceKey(state.queryResult.meta), JSON.stringify(state.resultColumnVisibility)); } catch {}
+}
+
+function renderResultColumnControls(meta) {
+  const controls = $('#resultColumns');
+  controls.className = 'result-column-controls';
+  controls.innerHTML = `<span class="result-column-label">显示字段</span><div class="result-column-options">${meta.map((column, index) => `<label title="${esc(column.type)}"><input type="checkbox" data-column-index="${index}" ${state.resultColumnVisibility[index] ? 'checked' : ''}><span>${esc(column.name)}</span></label>`).join('')}</div>`;
+  controls.querySelectorAll('input').forEach(input => input.addEventListener('change', event => {
+    state.resultColumnVisibility[Number(event.currentTarget.dataset.columnIndex)] = event.currentTarget.checked;
+    writeResultColumnVisibility();
+    renderResultTable();
+  }));
+}
+
+function renderResultTable() {
+  const result = state.queryResult;
+  if (!result?.meta?.length) return;
+  const visibleColumns = result.meta.map((column, index) => ({column, index})).filter(item => state.resultColumnVisibility[item.index]);
+  if (!visibleColumns.length) {
+    $('#result').className = 'empty result-no-columns';
+    $('#result').textContent = '请至少选择一个字段以显示查询结果';
+    return;
+  }
+  $('#result').className = 'table-wrap';
+  $('#result').innerHTML = `<table><thead><tr>${visibleColumns.map(({column}) => `<th title="${esc(column.type)}">${esc(column.name)}</th>`).join('')}</tr></thead><tbody>${(result.data || []).map(row => `<tr>${visibleColumns.map(({column}) => `<td class="code result-cell">${esc(value(row[column.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  requestAnimationFrame(updateResultOverflowTooltips);
+}
+
+function updateResultOverflowTooltips() {
+  $$('#result td.result-cell').forEach(cell => {
+    if (cell.scrollWidth > cell.clientWidth) cell.title = cell.textContent;
+    else cell.removeAttribute('title');
+  });
+}
+
+$('#result').addEventListener('mouseover', event => {
+  const cell = event.target.closest('td.result-cell');
+  if (!cell) return;
+  if (cell.scrollWidth > cell.clientWidth) cell.title = cell.textContent;
+  else cell.removeAttribute('title');
+});
 
 async function loadDatabases() {
   try {
