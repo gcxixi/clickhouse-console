@@ -39,7 +39,17 @@ docker compose up --build -d
 docker compose logs console
 ```
 
-Compose 默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请在前面配置带 TLS 的反向代理，不要直接暴露到公网。
+Compose 会先运行一次短生命周期的 `init-data` 服务，将数据卷设置为应用的非 root 用户可读写，然后启动控制台。这也会自动修复旧版本创建的 root 属主数据卷。默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请在前面配置带 TLS 的反向代理，不要直接暴露到公网。
+
+如果未使用 Compose，并遇到 `open /data/console.json.tmp: permission denied`，可使用镜像内置命令修复专用数据卷：
+
+```bash
+docker run --rm --user 0:0 \
+  -v clickhouse-console_console-data:/data \
+  ghcr.io/your-org/clickhouse-console:latest init-data-dir
+```
+
+将镜像名和卷名替换为实际值。修复命令只接受绝对路径并拒绝根目录，同时会把 `/data` 内目录设为 `0700`、文件设为 `0600`、属主设为 UID/GID `65532`。
 
 ## 配置
 
@@ -47,6 +57,7 @@ Compose 默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请�
 |---|---|---|
 | `CH_CONSOLE_LISTEN` | `:8080` | HTTP 监听地址 |
 | `CH_CONSOLE_DATA_DIR` | `./data` | 用户和审计数据目录 |
+| `CH_CONSOLE_BASE_PATH` | 空 | 反向代理路径前缀，例如 `/clickhouse` |
 | `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | ClickHouse HTTP 地址 |
 | `CLICKHOUSE_USER` | `default` | ClickHouse 用户 |
 | `CLICKHOUSE_PASSWORD` | 空 | ClickHouse 密码，仅从环境读取 |
@@ -55,6 +66,27 @@ Compose 默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请�
 | `CH_CONSOLE_MAX_ROWS` | `1000` | 最大返回行数，范围 1–100000 |
 | `CH_CONSOLE_ADMIN_USER` | `admin` | 首次启动管理员用户名 |
 | `CH_CONSOLE_ADMIN_PASSWORD` | 随机生成 | 首次启动管理员密码 |
+
+### Nginx 路径前缀
+
+如果控制台部署在 `https://example.com/clickhouse/`，设置：
+
+```bash
+CH_CONSOLE_BASE_PATH=/clickhouse
+```
+
+并让 Nginx 保留该前缀转发（`proxy_pass` 后不要带 URI 尾部 `/`）：
+
+```nginx
+location /clickhouse/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+访问 `/clickhouse` 会自动重定向到 `/clickhouse/`。静态资源、API 和 Session Cookie 都会使用该前缀；如果 Nginx 已经剥离前缀，则保持 `CH_CONSOLE_BASE_PATH` 为空即可。
 
 数据保存在权限为 `0600` 的 `console.json` 中，密码只保存 bcrypt 哈希。最多保留 5,000 条审计记录。生产部署应备份数据目录并限制文件系统访问。
 

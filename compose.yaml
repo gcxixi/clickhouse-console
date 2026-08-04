@@ -1,7 +1,17 @@
 services:
+  init-data:
+    build: .
+    user: "0:0"
+    restart: "no"
+    command: ["init-data-dir"]
+    volumes:
+      - console-data:/data
   console:
     build: .
     restart: unless-stopped
+    depends_on:
+      init-data:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -11,6 +21,7 @@ services:
       CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-default}
       CH_CONSOLE_ADMIN_USER: ${CH_CONSOLE_ADMIN_USER:-admin}
       CH_CONSOLE_ADMIN_PASSWORD: ${CH_CONSOLE_ADMIN_PASSWORD:-}
+      CH_CONSOLE_BASE_PATH: ${CH_CONSOLE_BASE_PATH:-}
     volumes:
       - console-data:/data
     extra_hosts:

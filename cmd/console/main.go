@@ -8,12 +8,25 @@ import (
 
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
 	"github.com/gcxixi/clickhouse-console/internal/config"
+	"github.com/gcxixi/clickhouse-console/internal/datadir"
 	"github.com/gcxixi/clickhouse-console/internal/server"
 	"github.com/gcxixi/clickhouse-console/internal/store"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) == 2 && os.Args[1] == "init-data-dir" {
+		dir := os.Getenv("CH_CONSOLE_DATA_DIR")
+		if dir == "" {
+			dir = "/data"
+		}
+		if err := datadir.Prepare(dir, 65532, 65532); err != nil {
+			log.Error("initialize data directory", "error", err)
+			os.Exit(1)
+		}
+		log.Info("data directory initialized", "directory", dir)
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration error", "error", err)
@@ -28,8 +41,8 @@ func main() {
 		log.Warn("bootstrap administrator created; save this password now", "username", cfg.AdminUser, "password", generated)
 	}
 	client := ch.New(cfg.ClickHouseURL, cfg.ClickHouseUser, cfg.ClickHousePassword, cfg.Database, cfg.MaxRows, cfg.QueryTimeout)
-	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, client, log), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
-	log.Info("clickhouse console listening", "address", cfg.Listen)
+	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, client, log, cfg.BasePath), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
+	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath)
 	if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("server stopped", "error", err)
 		os.Exit(1)
