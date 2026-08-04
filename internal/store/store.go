@@ -27,10 +27,10 @@ type PublicUser struct {
 	CreatedAt, UpdatedAt time.Time
 }
 type Audit struct {
-	ID, User, Action, Statement, Status, Error, RemoteAddr string
-	DurationMS                                             int64
-	Rows                                                   int
-	At                                                     time.Time
+	ID, User, Cluster, Action, Statement, Status, Error, RemoteAddr string
+	DurationMS                                                      int64
+	Rows                                                            int
+	At                                                              time.Time
 }
 type diskData struct {
 	Users  []User  `json:"users"`

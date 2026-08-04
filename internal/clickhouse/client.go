@@ -32,6 +32,14 @@ type Result struct {
 	ElapsedMS  int64            `json:"elapsed_ms"`
 	Kind       string           `json:"kind"`
 }
+type Monitoring struct {
+	GeneratedAt time.Time        `json:"generated_at"`
+	Metrics     []map[string]any `json:"metrics"`
+	Async       []map[string]any `json:"asynchronous_metrics"`
+	Events      []map[string]any `json:"events"`
+	Parts       []map[string]any `json:"parts"`
+	Disks       []map[string]any `json:"disks"`
+}
 
 var firstWord = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)*([a-z]+)`)
 
@@ -182,4 +190,41 @@ func (c *Client) Ping(ctx context.Context) error {
 		return errors.New("unexpected ping response")
 	}
 	return nil
+}
+
+func (c *Client) Monitor(ctx context.Context) (Monitoring, error) {
+	queries := map[string]string{
+		"metrics": "SELECT metric, value FROM system.metrics ORDER BY metric",
+		"async":   "SELECT replaceRegexpAll(toString(metric), '-', '_') AS metric, value FROM system.asynchronous_metrics ORDER BY metric",
+		"events":  "SELECT event, value FROM system.events ORDER BY event",
+		"parts":   "SELECT database, table, disk_name, sum(bytes) AS bytes, count() AS parts, sum(rows) AS rows FROM system.parts WHERE active = 1 GROUP BY database, table, disk_name ORDER BY bytes DESC LIMIT 100",
+		"disks":   "SELECT name, sum(free_space) AS free_space_in_bytes, sum(total_space) AS total_space_in_bytes FROM system.disks GROUP BY name ORDER BY name",
+	}
+	type response struct {
+		name string
+		data []map[string]any
+		err  error
+	}
+	results := make(chan response, len(queries))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for name, query := range queries {
+		go func() {
+			result, err := c.Execute(ctx, query)
+			results <- response{name: name, data: result.Data, err: err}
+		}()
+	}
+	collected := make(map[string][]map[string]any, len(queries))
+	for range queries {
+		result := <-results
+		if result.err != nil {
+			cancel()
+			return Monitoring{}, fmt.Errorf("read %s monitoring data: %w", result.name, result.err)
+		}
+		collected[result.name] = result.data
+	}
+	return Monitoring{
+		GeneratedAt: time.Now().UTC(), Metrics: collected["metrics"], Async: collected["async"],
+		Events: collected["events"], Parts: collected["parts"], Disks: collected["disks"],
+	}, nil
 }

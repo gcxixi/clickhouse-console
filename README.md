@@ -7,6 +7,8 @@
 - SQL 工作台：查询结果表格、执行耗时、错误反馈、快捷键执行
 - DDL / DML：按角色控制执行权限
 - 对象浏览器：查看数据库、表、引擎、行数和磁盘空间占用
+- 多集群：为多个 ClickHouse 地址配置唯一别名，在侧边栏二次确认后按会话切换
+- 运行监控：查看实时指标、异步指标、累计事件、活动 Parts 和磁盘容量，并提供一小时浏览器缓存与强制刷新
 - 控制台用户：创建、启用和停用用户，支持 `viewer`、`editor`、`admin`
 - 审计日志：记录登录、查询、DDL/DML 和用户管理操作
 - 安全默认值：bcrypt 密码哈希、HttpOnly/SameSite Cookie、CSRF 校验、CSP、安全响应头、单语句限制、结果行数和查询超时限制
@@ -58,6 +60,8 @@ docker run --rm --user 0:0 \
 | `CH_CONSOLE_LISTEN` | `:8080` | HTTP 监听地址 |
 | `CH_CONSOLE_DATA_DIR` | `./data` | 用户和审计数据目录 |
 | `CH_CONSOLE_BASE_PATH` | 空 | 反向代理路径前缀，例如 `/clickhouse` |
+| `CH_CONSOLE_CLUSTERS` | 空 | 多集群 JSON 数组；设置后替代下方单集群 `CLICKHOUSE_*` 配置 |
+| `CLICKHOUSE_ALIAS` | `default` | 单集群模式的唯一别名 |
 | `CLICKHOUSE_URL` | `http://127.0.0.1:8123` | ClickHouse HTTP 地址 |
 | `CLICKHOUSE_USER` | `default` | ClickHouse 用户 |
 | `CLICKHOUSE_PASSWORD` | 空 | ClickHouse 密码，仅从环境读取 |
@@ -66,6 +70,21 @@ docker run --rm --user 0:0 \
 | `CH_CONSOLE_MAX_ROWS` | `1000` | 最大返回行数，范围 1–100000 |
 | `CH_CONSOLE_ADMIN_USER` | `admin` | 首次启动管理员用户名 |
 | `CH_CONSOLE_ADMIN_PASSWORD` | 随机生成 | 首次启动管理员密码 |
+
+### 多集群配置
+
+每个 ClickHouse HTTP 地址必须配置一个唯一别名。数组第一项是新登录会话的默认集群；集群切换只影响当前登录会话，且页面会要求二次确认。示例：
+
+```bash
+CH_CONSOLE_CLUSTERS='[
+  {"alias":"primary","url":"http://clickhouse-1:8123","user":"default","password":"","database":"default"},
+  {"alias":"analytics","url":"http://clickhouse-2:8123","user":"default","password":"","database":"default"}
+]'
+```
+
+别名只能包含字母、数字、点、下划线和连字符，最长 64 个字符。请把真实密码放在部署环境或密钥管理系统中，不要提交 `.env`。未设置 `CH_CONSOLE_CLUSTERS` 时，原有 `CLICKHOUSE_URL`、`CLICKHOUSE_USER`、`CLICKHOUSE_PASSWORD` 和 `CLICKHOUSE_DATABASE` 配置继续有效。
+
+监控页参考 [clickhouse_exporter 的采集方式](https://github.com/ClickHouse/clickhouse_exporter/blob/master/exporter/exporter.go)，读取 `system.metrics`、`system.asynchronous_metrics`、`system.events`、`system.parts` 和 `system.disks`。监控快照按集群别名保存在浏览器 `localStorage`：一小时内优先使用缓存；超过一小时会先展示带时间标识的旧数据，再在后台刷新。页面的刷新按钮始终会强制获取最新数据。
 
 ### Nginx 路径前缀
 
