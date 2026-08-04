@@ -208,9 +208,12 @@ func (s *Store) saveLocked() error {
 	}
 	tmp := s.path + ".tmp"
 	if err = os.WriteFile(tmp, b, 0600); err != nil {
-		return err
+		return fmt.Errorf("write data store %q: %w (check CH_CONSOLE_DATA_DIR permissions)", tmp, err)
 	}
-	return os.Rename(tmp, s.path)
+	if err = os.Rename(tmp, s.path); err != nil {
+		return fmt.Errorf("replace data store %q: %w", s.path, err)
+	}
+	return nil
 }
 func public(u User) PublicUser {
 	return PublicUser{ID: u.ID, Username: u.Username, Role: u.Role, Disabled: u.Disabled, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}

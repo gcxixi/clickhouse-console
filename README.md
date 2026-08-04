@@ -39,7 +39,17 @@ docker compose up --build -d
 docker compose logs console
 ```
 
-Compose 默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请在前面配置带 TLS 的反向代理，不要直接暴露到公网。
+Compose 会先运行一次短生命周期的 `init-data` 服务，将数据卷设置为应用的非 root 用户可读写，然后启动控制台。这也会自动修复旧版本创建的 root 属主数据卷。默认只监听宿主机 `127.0.0.1:8080`。对外提供服务时，请在前面配置带 TLS 的反向代理，不要直接暴露到公网。
+
+如果未使用 Compose，并遇到 `open /data/console.json.tmp: permission denied`，可使用镜像内置命令修复专用数据卷：
+
+```bash
+docker run --rm --user 0:0 \
+  -v clickhouse-console_console-data:/data \
+  ghcr.io/your-org/clickhouse-console:latest init-data-dir
+```
+
+将镜像名和卷名替换为实际值。修复命令只接受绝对路径并拒绝根目录，同时会把 `/data` 内目录设为 `0700`、文件设为 `0600`、属主设为 UID/GID `65532`。
 
 ## 配置
 

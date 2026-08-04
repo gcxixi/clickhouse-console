@@ -8,12 +8,25 @@ import (
 
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
 	"github.com/gcxixi/clickhouse-console/internal/config"
+	"github.com/gcxixi/clickhouse-console/internal/datadir"
 	"github.com/gcxixi/clickhouse-console/internal/server"
 	"github.com/gcxixi/clickhouse-console/internal/store"
 )
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if len(os.Args) == 2 && os.Args[1] == "init-data-dir" {
+		dir := os.Getenv("CH_CONSOLE_DATA_DIR")
+		if dir == "" {
+			dir = "/data"
+		}
+		if err := datadir.Prepare(dir, 65532, 65532); err != nil {
+			log.Error("initialize data directory", "error", err)
+			os.Exit(1)
+		}
+		log.Info("data directory initialized", "directory", dir)
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration error", "error", err)
