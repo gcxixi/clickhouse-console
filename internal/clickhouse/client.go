@@ -352,27 +352,34 @@ func (c *Client) DatabaseSchema(ctx context.Context, database string) (DatabaseS
 	if err != nil {
 		return DatabaseSchema{}, fmt.Errorf("read database definition: %w", err)
 	}
-	objectsSQL := "SELECT toJSONString(groupArray(tuple(name, engine, create_table_query))) AS objects_json FROM (" +
+	objectsSQL := "SELECT groupArray(name) AS names, groupArray(engine) AS engines, groupArray(create_table_query) AS statements FROM (" +
 		"SELECT name, engine, create_table_query FROM system.tables WHERE database = " + quoteString(database) +
 		" ORDER BY multiIf(engine IN ('View', 'MaterializedView', 'LiveView', 'WindowView'), 2, engine = 'Dictionary', 1, 0), name)"
 	objectsResult, err := c.Execute(ctx, objectsSQL)
 	if err != nil {
 		return DatabaseSchema{}, err
 	}
-	objectsJSON, err := resultString(objectsResult, "objects_json")
+	names, err := resultStrings(objectsResult, "names")
 	if err != nil {
-		return DatabaseSchema{}, fmt.Errorf("read database objects: %w", err)
+		return DatabaseSchema{}, fmt.Errorf("read database object names: %w", err)
 	}
-	var rows [][]string
-	if err = json.Unmarshal([]byte(objectsJSON), &rows); err != nil {
-		return DatabaseSchema{}, fmt.Errorf("decode database objects: %w", err)
+	engines, err := resultStrings(objectsResult, "engines")
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("read database object engines: %w", err)
 	}
-	objects := make([]SchemaObject, 0, len(rows))
-	for _, row := range rows {
-		if len(row) != 3 || strings.TrimSpace(row[2]) == "" {
+	statements, err := resultStrings(objectsResult, "statements")
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("read database object definitions: %w", err)
+	}
+	if len(names) != len(engines) || len(names) != len(statements) {
+		return DatabaseSchema{}, errors.New("inconsistent database object definitions")
+	}
+	objects := make([]SchemaObject, 0, len(names))
+	for i := range names {
+		if strings.TrimSpace(statements[i]) == "" {
 			return DatabaseSchema{}, errors.New("invalid database object definition")
 		}
-		objects = append(objects, SchemaObject{Name: row[0], Engine: row[1], Statement: row[2]})
+		objects = append(objects, SchemaObject{Name: names[i], Engine: engines[i], Statement: statements[i]})
 	}
 	return DatabaseSchema{DatabaseStatement: databaseStatement, Objects: objects}, nil
 }
@@ -390,6 +397,25 @@ func resultString(result Result, key string) (string, error) {
 		return "", fmt.Errorf("invalid %s", key)
 	}
 	return text, nil
+}
+
+func resultStrings(result Result, key string) ([]string, error) {
+	if len(result.Data) != 1 {
+		return nil, errors.New("unexpected ClickHouse response")
+	}
+	values, ok := result.Data[0][key].([]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid %s", key)
+	}
+	stringsResult := make([]string, len(values))
+	for i, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid %s item", key)
+		}
+		stringsResult[i] = text
+	}
+	return stringsResult, nil
 }
 
 func quoteIdentifier(value string) string {

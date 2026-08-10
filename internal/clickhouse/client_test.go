@@ -162,11 +162,11 @@ func TestDatabaseSchema(t *testing.T) {
 			_, _ = w.Write(response)
 			return
 		}
-		objects, _ := json.Marshal([][]string{
-			{"events", "MergeTree", "CREATE TABLE `analytics'prod`.events (id UInt64) ENGINE = MergeTree ORDER BY id"},
-			{"events_view", "View", "CREATE VIEW `analytics'prod`.events_view AS SELECT * FROM `analytics'prod`.events"},
-		})
-		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{"objects_json": string(objects)}}, "rows": 1})
+		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{
+			"names":      []string{"events", "events_view"},
+			"engines":    []string{"MergeTree", "View"},
+			"statements": []string{"CREATE TABLE `analytics'prod`.events (id UInt64) ENGINE = MergeTree ORDER BY id", "CREATE VIEW `analytics'prod`.events_view AS SELECT * FROM `analytics'prod`.events"},
+		}}, "rows": 1})
 		_, _ = w.Write(response)
 	}))
 	defer ts.Close()
