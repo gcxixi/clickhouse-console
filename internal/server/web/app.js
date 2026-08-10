@@ -22,6 +22,7 @@ const lucideIcons = {
   'scroll-text': '<path d="M15 12h-5M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
   'server-cog': '<path d="m10.85 14.77-.38.93M13.15 14.77a3 3 0 1 0-2.3-5.54l-.38-.93M13.15 9.23l.38-.93M13.53 15.7l-.38-.93M14.77 10.85l.93-.38M14.77 13.15l.93.38M9.23 10.85l-.93-.38M9.23 13.15l-.93.38"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5M6 18h.01M6 6h.01"/>',
   settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  'shield-check': '<path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="m9 12 2 2 4-4"/>',
   'square-terminal': '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/>',
   'table-2': '<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
   'trash-2': '<path d="M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
@@ -36,6 +37,45 @@ function icon(name, size = 16) {
 
 function hydrateIcons(root = document) {
   root.querySelectorAll('[data-lucide]').forEach(element => { element.innerHTML = icon(element.dataset.lucide, Number(element.dataset.iconSize) || 16); });
+}
+
+const sqlKeywords = new Set('ADD AFTER ALIAS ALL ALTER AND ANTI ANY ARRAY AS ASC ASOF ATTACH BETWEEN BY CASE CAST CHECK CLEAR CLUSTER CODEC COLLATE COLUMN COMMENT CONSTRAINT CREATE CROSS CUBE DATABASE DATABASES DEFAULT DELETE DESC DESCRIBE DETACH DICTIONARY DISTINCT DISTRIBUTED DROP ELSE END ENGINE EXISTS EXPLAIN FINAL FIRST FORMAT FROM FULL FUNCTION GLOBAL GRANT GROUP HAVING IF IN INDEX INNER INSERT INTERVAL INTO IS JOIN KEY KILL LAST LEFT LIKE LIMIT LIVE LOCAL MATERIALIZED MODIFY MOVE MUTATION NOT NULL NULLS ON OPTIMIZE OR ORDER OUTER PARTITION PREWHERE PRIMARY PROJECTION RENAME REPLACE REVOKE RIGHT SAMPLE SELECT SETTINGS SHOW SYNC SYSTEM TABLE TABLES TEMPORARY THEN TIES TO TOP TOTALS TRUNCATE TTL UNION UPDATE USE USING VALUES VIEW WHEN WHERE WINDOW WITH'.split(' '));
+const sqlTypes = new Set('AGGREGATEFUNCTION ARRAY BOOL BOOLEAN DATE DATE32 DATETIME DATETIME64 DECIMAL ENUM ENUM8 ENUM16 FIXEDSTRING FLOAT32 FLOAT64 INT8 INT16 INT32 INT64 INT128 INT256 IPV4 IPV6 JSON LOWCARDINALITY MAP NESTED NOTHING NULLABLE OBJECT POINT POLYGON RING SIMPLEAGGREGATEFUNCTION STRING TUPLE UINT8 UINT16 UINT32 UINT64 UINT128 UINT256 UUID VARIANT'.split(' '));
+const sqlTokenPattern = /(--[^\n]*|#![^\n]*|#(?=[ \t])[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?\*\/|\$([A-Za-z0-9_]*)\$[\s\S]*?\$\2\$|'(?:\\[\s\S]|'')*'|`(?:\\[\s\S]|``)*`|"(?:\\[\s\S]|"")*"|\b(?:0x[\da-f]+|0b[01]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b|\b[A-Za-z_][A-Za-z0-9_]*\b)/gim;
+
+function highlightSQL(sql) {
+  let output = '';
+  let cursor = 0;
+  sqlTokenPattern.lastIndex = 0;
+  for (const match of sql.matchAll(sqlTokenPattern)) {
+    output += esc(sql.slice(cursor, match.index));
+    const token = match[0];
+    const upper = token.toUpperCase();
+    let tokenClass = '';
+    if (token.startsWith('--') || token.startsWith('#') || token.startsWith('//') || token.startsWith('/*')) tokenClass = 'sql-comment';
+    else if (token.startsWith("'") || token.startsWith('$')) tokenClass = 'sql-string';
+    else if (token.startsWith('`') || token.startsWith('"')) tokenClass = 'sql-identifier';
+    else if (/^(?:0x|0b|\d)/i.test(token)) tokenClass = 'sql-number';
+    else if (sqlKeywords.has(upper)) tokenClass = 'sql-keyword';
+    else if (sqlTypes.has(upper) || /^(?:U?Int(?:8|16|32|64|128|256)|Float(?:32|64)|Decimal\d*|DateTime64)$/i.test(token)) tokenClass = 'sql-type';
+    else if (/^\s*\(/.test(sql.slice(match.index + token.length))) tokenClass = 'sql-function';
+    output += tokenClass ? `<span class="${tokenClass}">${esc(token)}</span>` : esc(token);
+    cursor = match.index + token.length;
+  }
+  return output + esc(sql.slice(cursor));
+}
+
+function syncSQLHighlight() {
+  const editor = $('#sql');
+  const highlight = $('#sqlHighlight');
+  highlight.scrollTop = editor.scrollTop;
+  highlight.scrollLeft = editor.scrollLeft;
+}
+
+function updateSQLHighlight() {
+  const value = $('#sql').value;
+  $('#sqlHighlight').innerHTML = highlightSQL(value) + (value.endsWith('\n') ? ' ' : '');
+  syncSQLHighlight();
 }
 
 async function api(path, opts = {}) {
@@ -160,6 +200,7 @@ $('#clusterForm').onsubmit = async event => {
     renderClusterSelector();
     clearSuggestedSQL();
     $('#sql').value = '';
+    updateSQLHighlight();
     resetEditorTables();
     resetQueryResult();
     $('#databases').replaceChildren();
@@ -232,6 +273,7 @@ async function stageTableQuery(database, table) {
   state.selectedTable = table;
   state.suggestedSQL = '';
   editor.value = '';
+  updateSQLHighlight();
   editor.placeholder = '正在读取数据表字段…';
   $('#suggestionHint').classList.add('hidden');
   resetQueryResult();
@@ -276,6 +318,7 @@ function acceptSuggestedSQL() {
   const suggestion = state.suggestedSQL;
   clearSuggestedSQL();
   editor.value = suggestion;
+  updateSQLHighlight();
   editor.focus();
   editor.setSelectionRange(editor.value.length, editor.value.length);
   return true;
@@ -299,7 +342,10 @@ $('#queryTable').addEventListener('change', async event => {
 
 $('#sql').addEventListener('input', event => {
   if (state.suggestedSQL && event.target.value) clearSuggestedSQL();
+  updateSQLHighlight();
 });
+
+$('#sql').addEventListener('scroll', syncSQLHighlight);
 
 $('#sql').addEventListener('keydown', event => {
   if (event.key === 'Tab' && state.suggestedSQL && !event.currentTarget.value) {
@@ -314,16 +360,43 @@ $('#sql').addEventListener('keydown', event => {
 });
 
 $('#run').onclick = runQuery;
+$('#dryRun').onclick = dryRunQuery;
 $('#format').onclick = () => {
   const editor = $('#sql');
   if (!editor.value.trim()) return;
   editor.value = editor.value.trim().replace(/\s+(FROM|WHERE|GROUP BY|ORDER BY|LIMIT|SETTINGS|FORMAT)\s+/gi, '\n$1 ');
+  updateSQLHighlight();
 };
+
+async function dryRunQuery() {
+  const sql = $('#sql').value.trim();
+  if (!sql) return;
+  $('#dryRun').disabled = true;
+  $('#run').disabled = true;
+  $('#dryRun').innerHTML = `${icon('shield-check', 13)}<span>检查中…</span>`;
+  $('#queryStatus').className = 'status hidden';
+  try {
+    const result = await api('/api/query/dry-run', {method: 'POST', body: JSON.stringify({sql})});
+    const semantic = (result.statements || []).filter(statement => statement.validation === 'semantic').length;
+    const syntax = result.statement_count - semantic;
+    const detail = [semantic ? `${semantic} 条语义分析` : '', syntax ? `${syntax} 条语法检查` : ''].filter(Boolean).join('，');
+    $('#queryStatus').className = 'status ok';
+    $('#queryStatus').textContent = `Dry Run 通过 · ${result.statement_count} 条语句 · ${detail} · ${result.elapsed_ms} ms`;
+  } catch (error) {
+    $('#queryStatus').className = 'status error';
+    $('#queryStatus').textContent = error.message;
+  } finally {
+    $('#dryRun').disabled = false;
+    $('#run').disabled = false;
+    $('#dryRun').innerHTML = `${icon('shield-check', 13)}<span>Dry Run</span>`;
+  }
+}
 
 async function runQuery() {
   const sql = $('#sql').value.trim();
   if (!sql) return;
   $('#run').disabled = true;
+  $('#dryRun').disabled = true;
   $('#run').innerHTML = `${icon('play', 13)}<span>执行中…</span>`;
   $('#queryStatus').className = 'status hidden';
   try {
@@ -337,6 +410,7 @@ async function runQuery() {
     $('#queryStatus').textContent = error.message;
   } finally {
     $('#run').disabled = false;
+    $('#dryRun').disabled = false;
     $('#run').innerHTML = `${icon('play', 13)}<span>运行</span><kbd>⌘↵</kbd>`;
   }
 }
@@ -915,4 +989,5 @@ function date(input) { return new Date(input).toLocaleString(); }
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2600); }
 
 hydrateIcons();
+updateSQLHighlight();
 (async () => { try { showApp(await api('/api/session')); } catch { showLogin(); } })();

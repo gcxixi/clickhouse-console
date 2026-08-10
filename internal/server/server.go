@@ -87,6 +87,7 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("GET /api/health", s.auth(s.health))
 	m.HandleFunc("POST /api/cluster", s.auth(s.switchCluster))
 	m.HandleFunc("POST /api/query", s.auth(s.query))
+	m.HandleFunc("POST /api/query/dry-run", s.auth(s.dryRun))
 	m.HandleFunc("GET /api/schema/export", s.auth(s.exportDatabaseSchema))
 	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
 	m.HandleFunc("GET /api/clusters", s.admin(s.listClusters))
@@ -292,6 +293,64 @@ func authorizeSQLKind(role, kind string) error {
 		return errors.New("admin role is required for DDL")
 	}
 	return nil
+}
+func (s *Server) dryRun(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	var input struct {
+		SQL string `json:"sql"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	statements, err := ch.SplitStatements(input.SQL)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if len(statements) == 0 {
+		writeErr(w, 400, "SQL is required")
+		return
+	}
+	if len(statements) > 100 {
+		writeErr(w, 400, "a batch can contain at most 100 SQL statements")
+		return
+	}
+	for i, statement := range statements {
+		kind, classifyErr := ch.Classify(statement)
+		if classifyErr != nil {
+			writeErr(w, 400, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), classifyErr))
+			return
+		}
+		if authorizeErr := authorizeSQLKind(ss.User.Role, kind); authorizeErr != nil {
+			writeErr(w, 403, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), authorizeErr))
+			return
+		}
+	}
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	start := time.Now()
+	audit := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "dry-run", Statement: truncate(input.SQL, 2000), RemoteAddr: remote(r), Status: "ok"}
+	results := make([]map[string]any, 0, len(statements))
+	for i, statement := range statements {
+		kind, _ := ch.Classify(statement)
+		validation, elapsed, dryRunErr := client.DryRun(r.Context(), statement)
+		if dryRunErr != nil {
+			audit.Status = "error"
+			audit.DurationMS = time.Since(start).Milliseconds()
+			audit.Error = truncate(fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), dryRunErr), 1000)
+			s.db.AddAudit(audit)
+			writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("statement %d/%d dry run failed: %v", i+1, len(statements), dryRunErr), "failed_statement": i + 1, "checked_statements": i, "statement_count": len(statements), "validation": validation})
+			return
+		}
+		results = append(results, map[string]any{"index": i + 1, "kind": kind, "validation": validation, "elapsed_ms": elapsed})
+	}
+	audit.DurationMS = time.Since(start).Milliseconds()
+	audit.Rows = len(statements)
+	s.db.AddAudit(audit)
+	writeJSON(w, 200, map[string]any{"kind": "dry_run", "statement_count": len(statements), "checked_statements": len(statements), "elapsed_ms": audit.DurationMS, "statements": results})
 }
 func (s *Server) exportDatabaseSchema(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)

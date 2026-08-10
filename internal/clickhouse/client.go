@@ -326,6 +326,61 @@ func (c *Client) Execute(ctx context.Context, sql string) (Result, error) {
 	}
 	return r, nil
 }
+
+func (c *Client) DryRun(ctx context.Context, sql string) (string, int64, error) {
+	statements, err := SplitStatements(sql)
+	if err != nil {
+		return "", 0, err
+	}
+	if len(statements) != 1 {
+		return "", 0, errors.New("dry run expects exactly one SQL statement")
+	}
+	statement := statements[0]
+	if _, err = Classify(statement); err != nil {
+		return "", 0, err
+	}
+	body := strings.TrimLeft(statement[leadingTriviaLength(statement):], " \t\r\n\f")
+	match := firstWord.FindStringSubmatch(body)
+	validation := "syntax"
+	explain := "EXPLAIN AST " + statement
+	if len(match) > 1 && (strings.EqualFold(match[1], "SELECT") || strings.EqualFold(match[1], "WITH")) {
+		validation = "semantic"
+		explain = "EXPLAIN QUERY TREE " + statement
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return validation, 0, err
+	}
+	params := u.Query()
+	params.Set("database", c.database)
+	params.Set("default_format", "Null")
+	u.RawQuery = params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewBufferString(explain))
+	if err != nil {
+		return validation, 0, err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.password)
+	}
+	start := time.Now()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return validation, time.Since(start).Milliseconds(), err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	elapsed := time.Since(start).Milliseconds()
+	if err != nil {
+		return validation, elapsed, err
+	}
+	if resp.StatusCode >= 300 {
+		return validation, elapsed, fmt.Errorf("ClickHouse: %s", strings.TrimSpace(string(responseBody)))
+	}
+	return validation, elapsed, nil
+}
 func (c *Client) Ping(ctx context.Context) error {
 	r, err := c.Execute(ctx, "SELECT 1 AS ok")
 	if err != nil {

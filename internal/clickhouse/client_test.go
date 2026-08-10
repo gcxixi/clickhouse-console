@@ -150,6 +150,34 @@ func TestExecuteQuery(t *testing.T) {
 	}
 }
 
+func TestDryRunUsesSemanticAnalysisForSelectAndSyntaxForDDL(t *testing.T) {
+	var queries []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		queries = append(queries, string(body))
+		if strings.Contains(string(body), "broken_function") {
+			http.Error(w, "unknown function", http.StatusBadRequest)
+		}
+	}))
+	defer ts.Close()
+	client := New(ts.URL+"/?route=preserved", "u", "p", "default", 100, time.Second)
+	validation, _, err := client.DryRun(context.Background(), "SELECT count() FROM system.numbers")
+	if err != nil || validation != "semantic" {
+		t.Fatalf("SELECT dry run = %q, %v", validation, err)
+	}
+	validation, _, err = client.DryRun(context.Background(), "CREATE TABLE probe (id UInt64) ENGINE = MergeTree ORDER BY id")
+	if err != nil || validation != "syntax" {
+		t.Fatalf("DDL dry run = %q, %v", validation, err)
+	}
+	validation, _, err = client.DryRun(context.Background(), "SELECT broken_function(1)")
+	if err == nil || validation != "semantic" || !strings.Contains(err.Error(), "unknown function") {
+		t.Fatalf("invalid SELECT dry run = %q, %v", validation, err)
+	}
+	if len(queries) != 3 || !strings.HasPrefix(queries[0], "EXPLAIN QUERY TREE SELECT") || !strings.HasPrefix(queries[1], "EXPLAIN AST CREATE") {
+		t.Fatalf("dry run queries = %#v", queries)
+	}
+}
+
 func TestDatabaseSchema(t *testing.T) {
 	var queries []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

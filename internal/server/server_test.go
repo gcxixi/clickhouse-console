@@ -336,6 +336,56 @@ func TestBatchSQLExecutionAndRolePreflight(t *testing.T) {
 	}
 }
 
+func TestDryRunDoesNotExecuteOriginalStatements(t *testing.T) {
+	var checked []string
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		checked = append(checked, string(body))
+		if !strings.HasPrefix(string(body), "EXPLAIN ") {
+			t.Errorf("dry run executed original statement: %s", body)
+		}
+		if strings.Contains(string(body), "broken_function") {
+			http.Error(w, "unknown function", http.StatusBadRequest)
+		}
+	}))
+	defer clickhouseServer.Close()
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
+	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "test-password-123"})
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(loginBody))
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, loginRequest)
+	var session struct {
+		CSRF string `json:"csrf"`
+	}
+	if loginResponse.Code != http.StatusOK || json.Unmarshal(loginResponse.Body.Bytes(), &session) != nil {
+		t.Fatalf("login = %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	run := func(sql string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"sql": sql})
+		req := httptest.NewRequest(http.MethodPost, "/api/query/dry-run", bytes.NewReader(body))
+		req.AddCookie(loginResponse.Result().Cookies()[0])
+		req.Header.Set("X-CSRF-Token", session.CSRF)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	success := run("SELECT 1; CREATE TABLE probe (id UInt64) ENGINE = MergeTree ORDER BY id;")
+	if success.Code != http.StatusOK || !strings.Contains(success.Body.String(), `"statement_count":2`) || !strings.Contains(success.Body.String(), `"validation":"semantic"`) || !strings.Contains(success.Body.String(), `"validation":"syntax"`) {
+		t.Fatalf("dry run success = %d: %s", success.Code, success.Body.String())
+	}
+	failed := run("SELECT broken_function(1)")
+	if failed.Code != http.StatusBadRequest || !strings.Contains(failed.Body.String(), `"failed_statement":1`) {
+		t.Fatalf("dry run failure = %d: %s", failed.Code, failed.Body.String())
+	}
+	if len(checked) != 3 || !strings.HasPrefix(checked[0], "EXPLAIN QUERY TREE") || !strings.HasPrefix(checked[1], "EXPLAIN AST") {
+		t.Fatalf("checked statements = %#v", checked)
+	}
+}
+
 func TestExportDatabaseSchema(t *testing.T) {
 	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
