@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,6 +258,81 @@ func TestAlertValue(t *testing.T) {
 	}
 	if _, _, err := alertValue("not-a-number"); err == nil {
 		t.Fatal("invalid scalar should fail")
+	}
+}
+
+func TestBatchSQLExecutionAndRolePreflight(t *testing.T) {
+	var mu sync.Mutex
+	var executed []string
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		statement := string(body)
+		mu.Lock()
+		executed = append(executed, statement)
+		mu.Unlock()
+		if strings.Contains(statement, "bad_table") {
+			http.Error(w, "simulated failure", http.StatusBadRequest)
+		}
+	}))
+	defer clickhouseServer.Close()
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateUser("viewer", "viewer-password-123", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
+	type loginResponse struct {
+		CSRF string `json:"csrf"`
+	}
+	login := func(username, password string) (*http.Cookie, string) {
+		body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+		req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login %s = %d: %s", username, rec.Code, rec.Body.String())
+		}
+		var session loginResponse
+		if err = json.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+			t.Fatal(err)
+		}
+		return rec.Result().Cookies()[0], session.CSRF
+	}
+	run := func(cookie *http.Cookie, csrf, sql string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"sql": sql})
+		req := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(body))
+		req.AddCookie(cookie)
+		req.Header.Set("X-CSRF-Token", csrf)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	adminCookie, adminCSRF := login("admin", "test-password-123")
+	success := run(adminCookie, adminCSRF, "CREATE TABLE one (id UInt8); DROP TABLE one;")
+	if success.Code != http.StatusOK || !strings.Contains(success.Body.String(), `"statement_count":2`) {
+		t.Fatalf("batch success = %d: %s", success.Code, success.Body.String())
+	}
+	mu.Lock()
+	countAfterSuccess := len(executed)
+	mu.Unlock()
+	if countAfterSuccess != 2 {
+		t.Fatalf("executed = %#v", executed)
+	}
+	viewerCookie, viewerCSRF := login("viewer", "viewer-password-123")
+	denied := run(viewerCookie, viewerCSRF, "SELECT 1; DROP TABLE protected;")
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "statement 2/2") {
+		t.Fatalf("viewer batch = %d: %s", denied.Code, denied.Body.String())
+	}
+	mu.Lock()
+	if len(executed) != countAfterSuccess {
+		t.Fatalf("unauthorized batch partially executed: %#v", executed)
+	}
+	mu.Unlock()
+	failed := run(adminCookie, adminCSRF, "CREATE TABLE before_failure (id UInt8); DROP TABLE bad_table;")
+	if failed.Code != http.StatusBadRequest || !strings.Contains(failed.Body.String(), `"executed_statements":1`) {
+		t.Fatalf("failed batch = %d: %s", failed.Code, failed.Body.String())
 	}
 }
 

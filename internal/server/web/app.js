@@ -328,8 +328,8 @@ async function runQuery() {
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql})});
     $('#queryStatus').className = 'status ok';
-    $('#queryStatus').textContent = `执行成功 · ${result.elapsed_ms} ms`;
-    $('#resultMeta').textContent = result.kind === 'query' ? `${result.rows || 0} 行 · ${result.elapsed_ms} ms` : `${result.kind.toUpperCase()} 执行成功`;
+    $('#queryStatus').textContent = result.kind === 'batch' ? `${result.statement_count} 条语句执行成功 · ${result.elapsed_ms} ms` : `执行成功 · ${result.elapsed_ms} ms`;
+    $('#resultMeta').textContent = result.kind === 'query' ? `${result.rows || 0} 行 · ${result.elapsed_ms} ms` : result.kind === 'batch' ? `${result.statement_count} 条全部成功${result.meta?.length ? ` · 最后一条返回 ${result.rows || 0} 行` : ''}` : `${result.kind.toUpperCase()} 执行成功`;
     renderResult(result);
   } catch (error) {
     $('#queryStatus').className = 'status error';
@@ -347,7 +347,7 @@ function renderResult(result) {
     $('#resultColumns').className = 'result-column-controls hidden';
     $('#resultColumns').replaceChildren();
     $('#result').className = 'empty';
-    $('#result').textContent = '命令执行成功';
+    $('#result').textContent = result.kind === 'batch' ? `${result.statement_count} 条语句已按顺序执行成功` : '命令执行成功';
     return;
   }
   state.resultColumnVisibility = readResultColumnVisibility(result.meta);
