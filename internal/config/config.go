@@ -27,6 +27,16 @@ type Config struct {
 	EncryptionKey             string
 	QueryTimeout              time.Duration
 	MaxRows                   int
+	Alerting                  Alerting
+}
+
+type Alerting struct {
+	Enabled        bool
+	Environment    bool
+	Driver         string
+	DSN            string
+	HistoryLimit   int
+	WebhookTimeout time.Duration
 }
 
 var clusterAliasPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -50,6 +60,29 @@ func Load() (Config, error) {
 	c.MaxRows, err = strconv.Atoi(env("CH_CONSOLE_MAX_ROWS", "1000"))
 	if err != nil || c.MaxRows < 1 || c.MaxRows > 100000 {
 		return c, fmt.Errorf("CH_CONSOLE_MAX_ROWS must be between 1 and 100000")
+	}
+	c.Alerting.Environment = strings.TrimSpace(os.Getenv("CH_CONSOLE_ALERTING_DRIVER")) != "" || strings.TrimSpace(os.Getenv("CH_CONSOLE_ALERTING_DSN")) != ""
+	c.Alerting.Enabled, err = strconv.ParseBool(env("CH_CONSOLE_ALERTING_ENABLED", "false"))
+	if err != nil {
+		return c, fmt.Errorf("CH_CONSOLE_ALERTING_ENABLED must be true or false")
+	}
+	c.Alerting.Driver = strings.ToLower(strings.TrimSpace(os.Getenv("CH_CONSOLE_ALERTING_DRIVER")))
+	c.Alerting.DSN = strings.TrimSpace(os.Getenv("CH_CONSOLE_ALERTING_DSN"))
+	c.Alerting.HistoryLimit, err = strconv.Atoi(env("CH_CONSOLE_ALERTING_HISTORY_LIMIT", "300"))
+	if err != nil || c.Alerting.HistoryLimit < 10 || c.Alerting.HistoryLimit > 10000 {
+		return c, fmt.Errorf("CH_CONSOLE_ALERTING_HISTORY_LIMIT must be between 10 and 10000")
+	}
+	c.Alerting.WebhookTimeout, err = time.ParseDuration(env("CH_CONSOLE_ALERTING_WEBHOOK_TIMEOUT", "15s"))
+	if err != nil || c.Alerting.WebhookTimeout < time.Second || c.Alerting.WebhookTimeout > time.Minute {
+		return c, fmt.Errorf("CH_CONSOLE_ALERTING_WEBHOOK_TIMEOUT must be between 1s and 1m")
+	}
+	if c.Alerting.Environment && c.Alerting.Enabled {
+		if c.Alerting.Driver != "sqlite" && c.Alerting.Driver != "postgres" && c.Alerting.Driver != "mysql" {
+			return c, fmt.Errorf("CH_CONSOLE_ALERTING_DRIVER must be sqlite, postgres, or mysql")
+		}
+		if c.Alerting.DSN == "" {
+			return c, fmt.Errorf("CH_CONSOLE_ALERTING_DSN is required when environment-managed alerting is enabled")
+		}
 	}
 	c.Clusters, err = loadClusters()
 	if err != nil {

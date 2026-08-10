@@ -21,3 +21,13 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Database drivers
+
+This project links the following Go database drivers and their transitive dependencies:
+
+- `github.com/go-sql-driver/mysql` v1.9.3 — Mozilla Public License 2.0
+- `github.com/jackc/pgx/v5` v5.7.6 — MIT License, Copyright (c) 2013-2021 Jack Christensen
+- `modernc.org/sqlite` v1.38.2 — BSD 3-Clause License, Copyright (c) 2017 The Sqlite Authors
+
+The corresponding license texts and source are distributed by each upstream module at the version recorded in `go.mod` and `go.sum`.

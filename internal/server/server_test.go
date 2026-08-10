@@ -27,7 +27,7 @@ func TestBasePathRoutesAssetsAndScopesCookie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "/clickhouse")
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "/clickhouse", nil, nil, nil, "")
 
 	request := func(method, target, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -72,7 +72,7 @@ func TestPlatformClusterCredentialsUseEncryptedEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	platform := testPlatformStore(t)
-	handler := New(db, platform, []Cluster{{Alias: "default", URL: "http://env-user:env-pass@default:8123?password=hidden&keep=1", Database: "default", Source: "environment"}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	handler := New(db, platform, []Cluster{{Alias: "default", URL: "http://env-user:env-pass@default:8123?password=hidden&keep=1", Database: "default", Source: "environment"}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
 	request := func(method, target string, body []byte, csrf string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, target, strings.NewReader(string(body)))
 		if len(body) > 0 {
@@ -151,7 +151,7 @@ func TestRootDeploymentStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	if recorder.Code != http.StatusOK {
@@ -177,7 +177,7 @@ func TestSessionClusterSwitchRoutesQueries(t *testing.T) {
 	handler := New(db, testPlatformStore(t), []Cluster{
 		{Alias: "alpha", Client: ch.New(alpha.URL, "", "", "default", 100, time.Second)},
 		{Alias: "beta", Client: ch.New(beta.URL, "", "", "default", 100, time.Second)},
-	}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "")
+	}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
 
 	request := func(method, target, body, csrf string, cookie *http.Cookie) *httptest.ResponseRecorder {
 		t.Helper()
@@ -241,6 +241,21 @@ func TestSessionClusterSwitchRoutesQueries(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("cluster switch was not audited")
+	}
+}
+
+func TestAlertValue(t *testing.T) {
+	for _, test := range []struct {
+		value  any
+		active bool
+	}{{true, true}, {false, false}, {float64(1), true}, {float64(0), false}, {"firing", true}, {"0", false}, {nil, false}} {
+		active, _, err := alertValue(test.value)
+		if err != nil || active != test.active {
+			t.Fatalf("alertValue(%#v) = %v, %v", test.value, active, err)
+		}
+	}
+	if _, _, err := alertValue("not-a-number"); err == nil {
+		t.Fatal("invalid scalar should fail")
 	}
 }
 

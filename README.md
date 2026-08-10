@@ -9,6 +9,7 @@
 - 对象浏览器：查看数据库、表、引擎、行数和磁盘空间占用
 - 多集群：支持环境变量和管理员页面配置多个 ClickHouse 地址，在侧边栏二次确认后按会话切换
 - 运行监控：查看实时指标、异步指标、累计事件、活动 Parts 和磁盘容量，并提供一小时浏览器缓存与强制刷新
+- 报警中心：按 SQL 周期执行，支持 PromQL 风格 `for` 持续判定、firing/resolved Webhook、SQLite/PostgreSQL/MySQL 存储和发送记录
 - 控制台用户：创建、启用和停用用户，支持 `viewer`、`editor`、`admin`
 - 审计日志：记录登录、查询、DDL/DML 和用户管理操作
 - 安全默认值：bcrypt 密码哈希、HttpOnly/SameSite Cookie、CSRF 校验、CSP、安全响应头、单语句限制、结果行数和查询超时限制
@@ -69,6 +70,11 @@ docker run --rm --user 0:0 \
 | `CLICKHOUSE_DATABASE` | `default` | 默认数据库 |
 | `CH_CONSOLE_QUERY_TIMEOUT` | `60s` | 单次查询超时 |
 | `CH_CONSOLE_MAX_ROWS` | `1000` | 最大返回行数，范围 1–100000 |
+| `CH_CONSOLE_ALERTING_ENABLED` | `false` | 是否启用环境变量管理的报警调度 |
+| `CH_CONSOLE_ALERTING_DRIVER` | 空 | 报警存储：`sqlite`、`postgres` 或 `mysql`；留空时允许管理员在平台配置 |
+| `CH_CONSOLE_ALERTING_DSN` | 空 | 报警数据库连接串，仅从环境读取且不会通过 API 返回 |
+| `CH_CONSOLE_ALERTING_HISTORY_LIMIT` | `300` | 触发记录和 Webhook 发送记录各自保留的最近条数，范围 10–10000 |
+| `CH_CONSOLE_ALERTING_WEBHOOK_TIMEOUT` | `15s` | Webhook 请求超时，范围 1s–1m |
 | `CH_CONSOLE_ADMIN_USER` | `admin` | 首次启动管理员用户名 |
 | `CH_CONSOLE_ADMIN_PASSWORD` | 随机生成 | 首次启动管理员密码 |
 
@@ -115,6 +121,8 @@ location /clickhouse/ {
 访问 `/clickhouse` 会自动重定向到 `/clickhouse/`。静态资源、API 和 Session Cookie 都会使用该前缀；如果 Nginx 已经剥离前缀，则保持 `CH_CONSOLE_BASE_PATH` 为空即可。
 
 数据保存在权限为 `0600` 的 `console.json` 中，密码只保存 bcrypt 哈希。最多保留 5,000 条审计记录。生产部署应备份数据目录并限制文件系统访问。
+
+报警模块的领域模型、时间窗口、Webhook 协议、三种数据库连接示例和查询结果大数据量展示建议见 [报警设计文档](docs/alerting.md)。平台配置的报警数据库连接串、Webhook 完整 URL 与 Authorization 请求头均使用和集群凭据相同的浏览器端 RSA-OAEP/AES-GCM 封装，并以 AES-256-GCM 密文落盘或落库；API 只返回存储类型、配置状态和 Webhook 地址 origin。
 
 ## 开发与验证
 

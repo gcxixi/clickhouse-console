@@ -54,7 +54,7 @@ type Store struct {
 }
 
 func Open(dir, configuredKey string) (*Store, error) {
-	key, err := loadKey(dir, configuredKey)
+	key, err := LoadEncryptionKey(dir, configuredKey)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +268,7 @@ func normalizedDatabase(database string) string {
 	return "default"
 }
 
-func loadKey(dir, configured string) ([]byte, error) {
+func LoadEncryptionKey(dir, configured string) ([]byte, error) {
 	if strings.TrimSpace(configured) != "" {
 		key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(configured))
 		if err != nil || len(key) != keySize {

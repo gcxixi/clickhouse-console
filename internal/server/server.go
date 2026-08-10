@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gcxixi/clickhouse-console/internal/alertconfig"
+	"github.com/gcxixi/clickhouse-console/internal/alerting"
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
 	"github.com/gcxixi/clickhouse-console/internal/clusterconfig"
 	"github.com/gcxixi/clickhouse-console/internal/store"
@@ -40,23 +42,27 @@ type Cluster struct {
 	Client                           *ch.Client
 }
 type Server struct {
-	db         *store.Store
-	platform   *clusterconfig.Store
-	clusters   map[string]Cluster
-	aliases    []string
-	maxRows    int
-	timeout    time.Duration
-	log        *slog.Logger
-	mu         sync.RWMutex
-	sessions   map[string]session
-	basePath   string
-	cookiePath string
-	keyOnce    sync.Once
-	key        *rsa.PrivateKey
-	keyErr     error
+	db                *store.Store
+	platform          *clusterconfig.Store
+	clusters          map[string]Cluster
+	aliases           []string
+	maxRows           int
+	timeout           time.Duration
+	log               *slog.Logger
+	mu                sync.RWMutex
+	sessions          map[string]session
+	basePath          string
+	cookiePath        string
+	keyOnce           sync.Once
+	key               *rsa.PrivateKey
+	keyErr            error
+	alerts            *alerting.Service
+	alertConfig       *alertconfig.Store
+	alertEnvironment  *alertconfig.Config
+	alertStartupError string
 }
 
-func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string) http.Handler {
+func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string, alerts *alerting.Service, alertConfig *alertconfig.Store, alertEnvironment *alertconfig.Config, alertStartupError string) http.Handler {
 	if len(configured) == 0 {
 		panic("at least one ClickHouse cluster is required")
 	}
@@ -64,10 +70,13 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	if basePath != "" {
 		cookiePath = basePath + "/"
 	}
-	s := &Server{db: db, platform: platform, clusters: make(map[string]Cluster, len(configured)), aliases: make([]string, 0, len(configured)), maxRows: maxRows, timeout: timeout, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath}
+	s := &Server{db: db, platform: platform, clusters: make(map[string]Cluster, len(configured)), aliases: make([]string, 0, len(configured)), maxRows: maxRows, timeout: timeout, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath, alerts: alerts, alertConfig: alertConfig, alertEnvironment: alertEnvironment, alertStartupError: alertStartupError}
 	for _, cluster := range configured {
 		s.clusters[cluster.Alias] = cluster
 		s.aliases = append(s.aliases, cluster.Alias)
+	}
+	if alerts != nil {
+		alerts.SetExecutor(alertQueryExecutor{s: s})
 	}
 	m := http.NewServeMux()
 	m.HandleFunc("POST /api/login", s.login)
@@ -79,6 +88,7 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
 	m.HandleFunc("GET /api/clusters", s.admin(s.listClusters))
 	m.HandleFunc("GET /api/clusters/transport-key", s.admin(s.transportKey))
+	m.HandleFunc("GET /api/transport-key", s.admin(s.transportKey))
 	m.HandleFunc("POST /api/clusters", s.admin(s.createCluster))
 	m.HandleFunc("PUT /api/clusters/{id}", s.admin(s.updateCluster))
 	m.HandleFunc("DELETE /api/clusters/{id}", s.admin(s.deleteCluster))
@@ -86,6 +96,18 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("POST /api/users", s.admin(s.createUser))
 	m.HandleFunc("PATCH /api/users/{id}", s.admin(s.updateUser))
 	m.HandleFunc("GET /api/audit", s.admin(s.audit))
+	m.HandleFunc("GET /api/alerting/config", s.admin(s.alertingConfig))
+	m.HandleFunc("PUT /api/alerting/config", s.admin(s.updateAlertingConfig))
+	m.HandleFunc("GET /api/alerting/rules", s.admin(s.alertRules))
+	m.HandleFunc("POST /api/alerting/rules", s.admin(s.createAlertRule))
+	m.HandleFunc("PUT /api/alerting/rules/{id}", s.admin(s.updateAlertRule))
+	m.HandleFunc("DELETE /api/alerting/rules/{id}", s.admin(s.deleteAlertRule))
+	m.HandleFunc("GET /api/alerting/webhooks", s.admin(s.alertWebhooks))
+	m.HandleFunc("POST /api/alerting/webhooks", s.admin(s.createAlertWebhook))
+	m.HandleFunc("PUT /api/alerting/webhooks/{id}", s.admin(s.updateAlertWebhook))
+	m.HandleFunc("DELETE /api/alerting/webhooks/{id}", s.admin(s.deleteAlertWebhook))
+	m.HandleFunc("GET /api/alerting/events", s.admin(s.alertEvents))
+	m.HandleFunc("GET /api/alerting/deliveries", s.admin(s.alertDeliveries))
 	sub, _ := fs.Sub(webFS, "web")
 	m.Handle("/", http.FileServer(http.FS(sub)))
 	if basePath == "" {
@@ -404,35 +426,9 @@ func (s *Server) transportPrivateKey() (*rsa.PrivateKey, error) {
 }
 
 func (s *Server) decryptCredentials(envelope credentialEnvelope) (string, string, error) {
-	key, err := s.transportPrivateKey()
+	plain, err := s.decryptEnvelope(envelope)
 	if err != nil {
-		return "", "", errors.New("credential encryption is unavailable")
-	}
-	wrapped, err := base64.StdEncoding.DecodeString(envelope.Key)
-	if err != nil || len(wrapped) > 512 {
-		return "", "", errors.New("invalid encrypted credential key")
-	}
-	aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, key, wrapped, nil)
-	if err != nil || len(aesKey) != 32 {
-		return "", "", errors.New("unable to decrypt credentials")
-	}
-	defer clear(aesKey)
-	block, err := aes.NewCipher(aesKey)
-	if err != nil {
-		return "", "", errors.New("unable to decrypt credentials")
-	}
-	var aead cipher.AEAD
-	if aead, err = cipher.NewGCM(block); err != nil {
-		return "", "", errors.New("unable to decrypt credentials")
-	}
-	nonce, nonceErr := base64.StdEncoding.DecodeString(envelope.Nonce)
-	ciphertext, cipherErr := base64.StdEncoding.DecodeString(envelope.Ciphertext)
-	if nonceErr != nil || cipherErr != nil || len(nonce) != aead.NonceSize() || len(ciphertext) > 4096 {
-		return "", "", errors.New("invalid encrypted credentials")
-	}
-	plain, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", "", errors.New("unable to decrypt credentials")
+		return "", "", err
 	}
 	defer clear(plain)
 	var credentials struct {
@@ -443,6 +439,40 @@ func (s *Server) decryptCredentials(envelope credentialEnvelope) (string, string
 		return "", "", errors.New("invalid credential payload")
 	}
 	return credentials.User, credentials.Password, nil
+}
+
+func (s *Server) decryptEnvelope(envelope credentialEnvelope) ([]byte, error) {
+	key, err := s.transportPrivateKey()
+	if err != nil {
+		return nil, errors.New("credential encryption is unavailable")
+	}
+	wrapped, err := base64.StdEncoding.DecodeString(envelope.Key)
+	if err != nil || len(wrapped) > 512 {
+		return nil, errors.New("invalid encrypted credential key")
+	}
+	aesKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, key, wrapped, nil)
+	if err != nil || len(aesKey) != 32 {
+		return nil, errors.New("unable to decrypt credentials")
+	}
+	defer clear(aesKey)
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, errors.New("unable to decrypt credentials")
+	}
+	var aead cipher.AEAD
+	if aead, err = cipher.NewGCM(block); err != nil {
+		return nil, errors.New("unable to decrypt credentials")
+	}
+	nonce, nonceErr := base64.StdEncoding.DecodeString(envelope.Nonce)
+	ciphertext, cipherErr := base64.StdEncoding.DecodeString(envelope.Ciphertext)
+	if nonceErr != nil || cipherErr != nil || len(nonce) != aead.NonceSize() || len(ciphertext) > 8192 {
+		return nil, errors.New("invalid encrypted credentials")
+	}
+	plain, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, errors.New("unable to decrypt credentials")
+	}
+	return plain, nil
 }
 
 func clusterJSON(cluster Cluster) map[string]any {
