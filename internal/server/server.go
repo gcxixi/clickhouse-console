@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -215,18 +216,30 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	kind, err := ch.Classify(in.SQL)
+	statements, err := ch.SplitStatements(in.SQL)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if ss.User.Role == "viewer" && kind != "query" {
-		writeErr(w, 403, "viewer role can only run read queries")
+	if len(statements) == 0 {
+		writeErr(w, 400, "SQL is required")
 		return
 	}
-	if ss.User.Role == "editor" && kind == "ddl" {
-		writeErr(w, 403, "admin role is required for DDL")
+	if len(statements) > 100 {
+		writeErr(w, 400, "a batch can contain at most 100 SQL statements")
 		return
+	}
+	kinds := make([]string, len(statements))
+	for i, statement := range statements {
+		kinds[i], err = ch.Classify(statement)
+		if err != nil {
+			writeErr(w, 400, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), err))
+			return
+		}
+		if err = authorizeSQLKind(ss.User.Role, kinds[i]); err != nil {
+			writeErr(w, 403, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), err))
+			return
+		}
 	}
 	start := time.Now()
 	client, ok := s.clusterClient(ss.ActiveCluster)
@@ -234,18 +247,49 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "active cluster is no longer available")
 		return
 	}
-	res, err := client.Execute(r.Context(), in.SQL)
-	a := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: kind, Statement: truncate(in.SQL, 2000), DurationMS: time.Since(start).Milliseconds(), RemoteAddr: remote(r), Status: "ok"}
-	if err != nil {
-		a.Status = "error"
-		a.Error = truncate(err.Error(), 1000)
-		s.db.AddAudit(a)
-		writeErr(w, 400, err.Error())
+	action := kinds[0]
+	if len(statements) > 1 {
+		action = "batch"
+	}
+	a := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: action, Statement: truncate(in.SQL, 2000), RemoteAddr: remote(r), Status: "ok"}
+	var final ch.Result
+	summaries := make([]ch.StatementResult, 0, len(statements))
+	for i, statement := range statements {
+		result, executeErr := client.Execute(r.Context(), statement)
+		if executeErr != nil {
+			a.Status = "error"
+			a.DurationMS = time.Since(start).Milliseconds()
+			a.Error = truncate(fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), executeErr), 1000)
+			s.db.AddAudit(a)
+			writeJSON(w, 400, map[string]any{"error": fmt.Sprintf("statement %d/%d failed: %v", i+1, len(statements), executeErr), "failed_statement": i + 1, "executed_statements": i, "statement_count": len(statements)})
+			return
+		}
+		final = result
+		summaries = append(summaries, ch.StatementResult{Index: i + 1, Kind: result.Kind, Rows: result.Rows, ElapsedMS: result.ElapsedMS})
+	}
+	a.DurationMS = time.Since(start).Milliseconds()
+	a.Rows = final.Rows
+	s.db.AddAudit(a)
+	if len(statements) == 1 {
+		writeJSON(w, 200, final)
 		return
 	}
-	a.Rows = res.Rows
-	s.db.AddAudit(a)
-	writeJSON(w, 200, res)
+	final.Kind = "batch"
+	final.ElapsedMS = a.DurationMS
+	final.StatementCount = len(statements)
+	final.ExecutedStatements = len(statements)
+	final.Statements = summaries
+	writeJSON(w, 200, final)
+}
+
+func authorizeSQLKind(role, kind string) error {
+	if role == "viewer" && kind != "query" {
+		return errors.New("viewer role can only run read queries")
+	}
+	if role == "editor" && kind == "ddl" {
+		return errors.New("admin role is required for DDL")
+	}
+	return nil
 }
 func (s *Server) monitor(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)

@@ -25,12 +25,21 @@ type Column struct {
 	Type string `json:"type"`
 }
 type Result struct {
-	Meta       []Column         `json:"meta,omitempty"`
-	Data       []map[string]any `json:"data,omitempty"`
-	Rows       int              `json:"rows"`
-	Statistics any              `json:"statistics,omitempty"`
-	ElapsedMS  int64            `json:"elapsed_ms"`
-	Kind       string           `json:"kind"`
+	Meta               []Column          `json:"meta,omitempty"`
+	Data               []map[string]any  `json:"data,omitempty"`
+	Rows               int               `json:"rows"`
+	Statistics         any               `json:"statistics,omitempty"`
+	ElapsedMS          int64             `json:"elapsed_ms"`
+	Kind               string            `json:"kind"`
+	StatementCount     int               `json:"statement_count,omitempty"`
+	ExecutedStatements int               `json:"executed_statements,omitempty"`
+	Statements         []StatementResult `json:"statements,omitempty"`
+}
+type StatementResult struct {
+	Index     int    `json:"index"`
+	Kind      string `json:"kind"`
+	Rows      int    `json:"rows"`
+	ElapsedMS int64  `json:"elapsed_ms"`
 }
 type Monitoring struct {
 	GeneratedAt time.Time        `json:"generated_at"`
@@ -41,21 +50,28 @@ type Monitoring struct {
 	Disks       []map[string]any `json:"disks"`
 }
 
-var firstWord = regexp.MustCompile(`(?is)^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)*([a-z]+)`)
+var (
+	firstWord     = regexp.MustCompile(`(?i)^([a-z]+)`)
+	alterMutation = regexp.MustCompile(`(?is)^ALTER\s+TABLE\b.*\b(UPDATE|DELETE)\b`)
+)
 
 func New(endpoint, user, password, database string, maxRows int, timeout time.Duration) *Client {
 	return &Client{endpoint: strings.TrimSpace(endpoint), user: user, password: password, database: database, maxRows: maxRows, timeout: timeout, http: &http.Client{Timeout: timeout + 5*time.Second}}
 }
 func Classify(sql string) (string, error) {
-	s := strings.TrimSpace(sql)
-	if s == "" {
+	statements, err := SplitStatements(sql)
+	if err != nil {
+		return "", err
+	}
+	if len(statements) == 0 {
 		return "", errors.New("SQL is required")
 	}
-	trimmed := strings.TrimSpace(strings.TrimSuffix(s, ";"))
-	if hasStatementSeparator(trimmed) {
-		return "", errors.New("multiple SQL statements are not allowed")
+	if len(statements) != 1 {
+		return "", errors.New("expected exactly one SQL statement")
 	}
-	m := firstWord.FindStringSubmatch(trimmed)
+	trimmed := statements[0]
+	statementBody := strings.TrimLeft(trimmed[leadingTriviaLength(trimmed):], " \t\r\n\f")
+	m := firstWord.FindStringSubmatch(statementBody)
 	if len(m) < 2 {
 		return "", errors.New("unable to classify SQL")
 	}
@@ -66,8 +82,7 @@ func Classify(sql string) (string, error) {
 	case "INSERT", "UPDATE", "DELETE", "OPTIMIZE":
 		return "dml", nil
 	case "ALTER":
-		upper := strings.ToUpper(trimmed)
-		if regexp.MustCompile(`(?s)^\s*ALTER\s+TABLE\b.*\b(UPDATE|DELETE)\b`).MatchString(upper) {
+		if alterMutation.MatchString(statementBody) {
 			return "dml", nil
 		}
 		return "ddl", nil
@@ -78,57 +93,178 @@ func Classify(sql string) (string, error) {
 	}
 }
 
-func hasStatementSeparator(sql string) bool {
+func SplitStatements(sql string) ([]string, error) {
+	var statements []string
+	var current strings.Builder
 	var quote byte
-	lineComment, blockComment := false, false
+	var heredoc string
+	lineComment, blockCommentDepth := false, 0
+	hasCode := false
 	for i := 0; i < len(sql); i++ {
 		c := sql[i]
+		if heredoc != "" {
+			if strings.HasPrefix(sql[i:], heredoc) {
+				current.WriteString(heredoc)
+				i += len(heredoc) - 1
+				heredoc = ""
+			} else {
+				current.WriteByte(c)
+			}
+			continue
+		}
 		if lineComment {
+			current.WriteByte(c)
 			if c == '\n' {
 				lineComment = false
 			}
 			continue
 		}
-		if blockComment {
-			if c == '*' && i+1 < len(sql) && sql[i+1] == '/' {
-				blockComment = false
+		if blockCommentDepth > 0 {
+			current.WriteByte(c)
+			if c == '/' && i+1 < len(sql) && sql[i+1] == '*' {
+				current.WriteByte(sql[i+1])
+				blockCommentDepth++
+				i++
+			} else if c == '*' && i+1 < len(sql) && sql[i+1] == '/' {
+				current.WriteByte(sql[i+1])
+				blockCommentDepth--
 				i++
 			}
 			continue
 		}
 		if quote != 0 {
+			current.WriteByte(c)
 			if c == '\\' {
-				i++
+				if i+1 < len(sql) {
+					i++
+					current.WriteByte(sql[i])
+				}
 				continue
 			}
 			if c == quote {
 				if i+1 < len(sql) && sql[i+1] == quote {
 					i++
+					current.WriteByte(sql[i])
 					continue
 				}
 				quote = 0
 			}
 			continue
 		}
-		if c == '-' && i+1 < len(sql) && sql[i+1] == '-' {
+		if delimiter := lineCommentDelimiter(sql, i); delimiter != "" {
+			current.WriteString(delimiter)
 			lineComment = true
-			i++
+			i += len(delimiter) - 1
 			continue
 		}
 		if c == '/' && i+1 < len(sql) && sql[i+1] == '*' {
-			blockComment = true
+			current.WriteString("/*")
+			blockCommentDepth = 1
 			i++
 			continue
 		}
+		if delimiter := heredocDelimiterAt(sql, i); delimiter != "" {
+			current.WriteString(delimiter)
+			hasCode = true
+			heredoc = delimiter
+			i += len(delimiter) - 1
+			continue
+		}
 		if c == '\'' || c == '"' || c == '`' {
+			current.WriteByte(c)
+			hasCode = true
 			quote = c
 			continue
 		}
 		if c == ';' {
-			return true
+			if hasCode {
+				statements = append(statements, strings.TrimSpace(current.String()))
+			}
+			current.Reset()
+			hasCode = false
+			continue
+		}
+		current.WriteByte(c)
+		if !strings.ContainsRune(" \t\r\n", rune(c)) {
+			hasCode = true
 		}
 	}
-	return false
+	if quote != 0 {
+		return nil, errors.New("unterminated quoted string or identifier")
+	}
+	if heredoc != "" {
+		return nil, errors.New("unterminated heredoc")
+	}
+	if blockCommentDepth > 0 {
+		return nil, errors.New("unterminated block comment")
+	}
+	if hasCode {
+		statements = append(statements, strings.TrimSpace(current.String()))
+	}
+	return statements, nil
+}
+
+func heredocDelimiterAt(sql string, start int) string {
+	if start >= len(sql) || sql[start] != '$' {
+		return ""
+	}
+	for i := start + 1; i < len(sql); i++ {
+		if sql[i] == '$' {
+			return sql[start : i+1]
+		}
+		if !isWordByte(sql[i]) {
+			return ""
+		}
+	}
+	return ""
+}
+
+func lineCommentDelimiter(sql string, start int) string {
+	if strings.HasPrefix(sql[start:], "--") || strings.HasPrefix(sql[start:], "//") || strings.HasPrefix(sql[start:], "#!") {
+		return sql[start : start+2]
+	}
+	if sql[start] == '#' && start+1 < len(sql) && (sql[start+1] == ' ' || sql[start+1] == '\t') {
+		return "#"
+	}
+	return ""
+}
+
+func leadingTriviaLength(sql string) int {
+	for i := 0; i < len(sql); {
+		switch sql[i] {
+		case ' ', '\t', '\r', '\n', '\f':
+			i++
+			continue
+		}
+		if delimiter := lineCommentDelimiter(sql, i); delimiter != "" {
+			i += len(delimiter)
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if !strings.HasPrefix(sql[i:], "/*") {
+			return i
+		}
+		depth := 1
+		i += 2
+		for i < len(sql) && depth > 0 {
+			if strings.HasPrefix(sql[i:], "/*") {
+				depth++
+				i += 2
+			} else if strings.HasPrefix(sql[i:], "*/") {
+				depth--
+				i += 2
+			} else {
+				i++
+			}
+		}
+	}
+	return len(sql)
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 func (c *Client) Execute(ctx context.Context, sql string) (Result, error) {
 	kind, err := Classify(sql)

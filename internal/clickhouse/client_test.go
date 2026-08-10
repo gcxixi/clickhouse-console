@@ -31,6 +31,41 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestSplitStatements(t *testing.T) {
+	input := "-- prepare\nCREATE TABLE `a;b` (value String); INSERT INTO `a;b` VALUES ('x;y'); /* outer ; /* nested ; */ still outer ; */ DROP TABLE `a;b`; -- trailing"
+	statements, err := SplitStatements(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statements) != 3 {
+		t.Fatalf("statements = %#v", statements)
+	}
+	if !strings.HasPrefix(statements[0], "-- prepare\nCREATE") || !strings.Contains(statements[1], "'x;y'") || !strings.Contains(statements[2], "DROP TABLE") {
+		t.Fatalf("unexpected statements: %#v", statements)
+	}
+	for _, input := range []string{"SELECT 'unterminated", "SELECT 1 /* unterminated", "SELECT $tag$unterminated"} {
+		if _, err = SplitStatements(input); err == nil {
+			t.Fatalf("SplitStatements(%q) should fail", input)
+		}
+	}
+	statements, err = SplitStatements(" ; -- only comment\n ; SELECT 1;;")
+	if err != nil || len(statements) != 1 || statements[0] != "SELECT 1" {
+		t.Fatalf("empty statements: %#v, %v", statements, err)
+	}
+	statements, err = SplitStatements("#! comment ;\nSELECT $sql$one; two$sql$; // comment ;\nSELECT $$three; four$$;")
+	if err != nil || len(statements) != 2 || !strings.Contains(statements[0], "one; two") || !strings.Contains(statements[1], "three; four") {
+		t.Fatalf("ClickHouse syntax: %#v, %v", statements, err)
+	}
+	for _, sql := range []string{"# comment\nSELECT 1", "// comment\nSELECT 1", "/* outer /* inner */ outer */ SELECT 1"} {
+		if kind, classifyErr := Classify(sql); classifyErr != nil || kind != "query" {
+			t.Fatalf("Classify(%q) = %q, %v", sql, kind, classifyErr)
+		}
+	}
+	if kind, classifyErr := Classify("/* maintenance */ ALTER TABLE events DELETE WHERE id = 1"); classifyErr != nil || kind != "dml" {
+		t.Fatalf("commented mutation = %q, %v", kind, classifyErr)
+	}
+}
+
 func TestMonitorCollectsExporterMetricSources(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]bool{}
