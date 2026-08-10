@@ -336,6 +336,60 @@ func TestBatchSQLExecutionAndRolePreflight(t *testing.T) {
 	}
 }
 
+func TestExportDatabaseSchema(t *testing.T) {
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(query, "SHOW CREATE DATABASE") {
+			_, _ = io.WriteString(w, `{"data":[{"statement":"CREATE DATABASE analytics ENGINE = Atomic"}],"rows":1}`)
+			return
+		}
+		objects, _ := json.Marshal([][]string{
+			{"events", "MergeTree", "CREATE TABLE analytics.events (id UInt64) ENGINE = MergeTree ORDER BY id"},
+			{"daily", "View", "CREATE VIEW analytics.daily AS SELECT count() FROM analytics.events"},
+		})
+		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{"objects_json": string(objects)}}, "rows": 1})
+		_, _ = w.Write(response)
+	}))
+	defer clickhouseServer.Close()
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
+	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "test-password-123"})
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(loginBody))
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login = %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	exportRequest := httptest.NewRequest(http.MethodGet, "/api/schema/export?database=analytics", nil)
+	exportRequest.AddCookie(loginResponse.Result().Cookies()[0])
+	exportResponse := httptest.NewRecorder()
+	handler.ServeHTTP(exportResponse, exportRequest)
+	if exportResponse.Code != http.StatusOK {
+		t.Fatalf("export = %d: %s", exportResponse.Code, exportResponse.Body.String())
+	}
+	if contentType := exportResponse.Header().Get("Content-Type"); contentType != "application/sql; charset=utf-8" {
+		t.Fatalf("content type = %q", contentType)
+	}
+	if disposition := exportResponse.Header().Get("Content-Disposition"); disposition != `attachment; filename="analytics-schema.sql"` {
+		t.Fatalf("content disposition = %q", disposition)
+	}
+	content := exportResponse.Body.String()
+	for _, expected := range []string{"-- Cluster: default", "CREATE DATABASE analytics ENGINE = Atomic;", "CREATE TABLE analytics.events", "CREATE VIEW analytics.daily"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("export missing %q: %s", expected, content)
+		}
+	}
+	audits := db.Audits(1)
+	if len(audits) != 1 || audits[0].Action != "schema.export" || audits[0].Rows != 2 || audits[0].Status != "ok" {
+		t.Fatalf("audit = %#v", audits)
+	}
+}
+
 func testPlatformStore(t *testing.T) *clusterconfig.Store {
 	t.Helper()
 	platform, err := clusterconfig.Open(t.TempDir(), "")

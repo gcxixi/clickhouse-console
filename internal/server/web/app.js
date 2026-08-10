@@ -12,6 +12,7 @@ const lucideIcons = {
   'code-xml': '<path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
+  'file-down': '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>',
   'log-out': '<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>',
   network: '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
   pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
@@ -415,13 +416,14 @@ $('#result').addEventListener('mouseover', event => {
 async function loadDatabases() {
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: 'SELECT name FROM system.databases ORDER BY name'})});
-    $('#databases').innerHTML = result.data.map(row => `<button data-db="${esc(row.name)}">${icon('database')}<span>${esc(row.name)}</span></button>`).join('');
-    $$('#databases button').forEach(button => button.onclick = () => loadTables(button.dataset.db, button));
+    $('#databases').innerHTML = result.data.map(row => `<div class="database-entry"><button class="database-select" data-db="${esc(row.name)}">${icon('database')}<span>${esc(row.name)}</span></button><button class="database-export" data-db="${esc(row.name)}" title="导出完整建表 SQL" aria-label="导出 ${esc(row.name)} 建表 SQL">${icon('file-down')}</button></div>`).join('');
+    $$('#databases .database-select').forEach(button => button.onclick = () => loadTables(button.dataset.db, button));
+    $$('#databases .database-export').forEach(button => button.onclick = () => exportDatabaseSchema(button.dataset.db, button));
   } catch (error) { toast(error.message); }
 }
 
 async function loadTables(database, databaseButton) {
-  $$('#databases button').forEach(button => button.classList.remove('active'));
+  $$('#databases .database-select').forEach(button => button.classList.remove('active'));
   databaseButton.classList.add('active');
   $('#tablesTitle').innerHTML = `${icon('table-2')}<span>${esc(database)} / 数据表</span>`;
   try {
@@ -440,6 +442,38 @@ async function loadTables(database, databaseButton) {
     $$('#tables .ddl-action').forEach(button => button.onclick = () => toggleDDL(button));
     $$('#tables .query-action').forEach(button => button.onclick = () => openTableInWorkbench(button.closest('.table-entry').dataset.db, button.closest('.table-entry').dataset.table));
   } catch (error) { toast(error.message); }
+}
+
+async function exportDatabaseSchema(database, button) {
+  button.disabled = true;
+  try {
+    const endpoint = new URL('schema/export', apiRoot);
+    endpoint.searchParams.set('database', database);
+    const response = await fetch(endpoint);
+    if (response.status === 401) {
+      showLogin();
+      throw new Error('登录已过期');
+    }
+    if (!response.ok) {
+      let message = `导出失败 (${response.status})`;
+      try { message = (await response.json()).error || message; } catch {}
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const objectURL = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectURL;
+    link.download = response.headers.get('X-Export-Filename') || `${database.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')}-schema.sql`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectURL);
+    toast(`${database} 建表 SQL 已导出`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function toggleDDL(button) {
