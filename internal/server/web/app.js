@@ -3,10 +3,11 @@ const $$ = selector => document.querySelectorAll(selector);
 const apiRoot = new URL('api/', document.baseURI);
 const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
 const monitorCacheTTL = 60 * 60 * 1000;
-let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: ''};
+let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: []};
 
 const lucideIcons = {
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  'bell-ring': '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/><path d="M4 2C2.8 3.7 2 5.7 2 8M20 2c1.2 1.7 2 3.7 2 6"/>',
   'arrow-right': '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
   'code-xml': '<path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
@@ -19,10 +20,12 @@ const lucideIcons = {
   'refresh-cw': '<path d="M3 12a9 9 0 0 1 15.74-6.26L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.74 6.26L3 16"/><path d="M8 16H3v5"/>',
   'scroll-text': '<path d="M15 12h-5M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
   'server-cog': '<path d="m10.85 14.77-.38.93M13.15 14.77a3 3 0 1 0-2.3-5.54l-.38-.93M13.15 9.23l.38-.93M13.53 15.7l-.38-.93M14.77 10.85l.93-.38M14.77 13.15l.93.38M9.23 10.85l-.93-.38M9.23 13.15l-.93.38"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5M6 18h.01M6 6h.01"/>',
+  settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   'square-terminal': '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/>',
   'table-2': '<path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/>',
   'trash-2': '<path d="M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3.13a4 4 0 0 1 0 7.74M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
+  webhook: '<path d="M18 16.98h-5.99c-1.1 0-1.95-.94-2.48-1.9L7 10.5"/><path d="m6 14-3-1.5L4.5 10"/><path d="M6 8.3a4 4 0 1 1 7.5-2.3l-3 5.2"/><circle cx="6" cy="18" r="3"/><path d="M14.3 18a4 4 0 1 0 2.2-7.5L11 10.4"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>'
 };
 
@@ -84,7 +87,7 @@ $('#loginForm').addEventListener('submit', async event => {
 $('#logout').onclick = async () => {
   try { await api('/api/logout', {method: 'POST'}); }
   finally {
-    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: ''};
+    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: []};
     showLogin();
   }
 };
@@ -97,6 +100,7 @@ function activateView(view) {
   $(`#${view}View`).classList.remove('hidden');
   if (view === 'schema') loadDatabases();
   if (view === 'monitor') loadMonitor();
+  if (view === 'alerting') loadAlerting();
   if (view === 'clusters') loadManagedClusters();
   if (view === 'users') loadUsers();
   if (view === 'audit') loadAudit();
@@ -549,18 +553,20 @@ $$('.close-cluster-manage').forEach(button => button.onclick = () => {
   $('#clusterManageDialog').close();
 });
 
-async function encryptClusterCredentials(user, password) {
+async function encryptPayload(payload) {
   if (!globalThis.crypto?.subtle || !globalThis.isSecureContext) throw new Error('凭据加密需要 HTTPS 或 localhost 安全上下文');
-  const jwk = await api('/api/clusters/transport-key');
+  const jwk = await api('/api/transport-key');
   const publicKey = await crypto.subtle.importKey('jwk', jwk, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
   const aesKey = await crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt']);
   const rawKey = await crypto.subtle.exportKey('raw', aesKey);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify({user, password}));
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, aesKey, plaintext);
   const wrappedKey = await crypto.subtle.encrypt({name: 'RSA-OAEP'}, publicKey, rawKey);
   return {key: base64(wrappedKey), nonce: base64(nonce), ciphertext: base64(ciphertext)};
 }
+
+async function encryptClusterCredentials(user, password) { return encryptPayload({user, password}); }
 
 function base64(value) {
   const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
@@ -610,6 +616,121 @@ async function deleteManagedCluster(id) {
     toast('集群已删除');
   } catch (error) { toast(error.message); }
 }
+
+async function loadAlerting() {
+  try {
+    const config = await api('/api/alerting/config');
+    state.alertingConfig = config;
+    $('#alertingStatus').className = `tag ${config.running ? 'ok' : config.error ? 'error' : ''}`;
+    $('#alertingStatus').textContent = config.running ? '调度运行中' : config.enabled ? '连接异常' : '未启用';
+    $('#alertingSource').textContent = `${config.source === 'environment' ? '环境变量' : '平台'} · ${config.driver || '未选择存储'} · 保留 ${config.history_limit || 300} 条`;
+    $('#configureAlerting').disabled = config.source === 'environment';
+    $('#configureAlerting').title = config.source === 'environment' ? '环境变量配置只读' : '';
+    $('#newAlertRule').disabled = !config.running;
+    $('#newAlertWebhook').disabled = !config.running;
+    if (config.error) toast(config.error);
+    if (!config.running) {
+      state.alertRules = []; state.alertWebhooks = [];
+      $('#alertRuleRows').innerHTML = '<tr><td colspan="7" class="empty">请先配置并启用报警存储</td></tr>';
+      $('#alertWebhookRows').innerHTML = '<tr><td colspan="6" class="empty">请先配置并启用报警存储</td></tr>';
+      $('#alertEventRows').innerHTML = '<tr><td colspan="6" class="empty">暂无记录</td></tr>';
+      $('#alertDeliveryRows').innerHTML = '<tr><td colspan="6" class="empty">暂无记录</td></tr>';
+      return;
+    }
+    const [rules, webhooks, events, deliveries] = await Promise.all([
+      api('/api/alerting/rules'), api('/api/alerting/webhooks'), api('/api/alerting/events'), api('/api/alerting/deliveries')
+    ]);
+    state.alertRules = rules || [];
+    state.alertWebhooks = webhooks || [];
+    renderAlertRules(); renderAlertWebhooks(); renderAlertEvents(events || []); renderAlertDeliveries(deliveries || []);
+  } catch (error) { toast(error.message); }
+}
+
+function renderAlertRules() {
+  $('#alertRuleRows').innerHTML = state.alertRules.length ? state.alertRules.map(rule => `<tr>
+    <td><strong>#${rule.id}</strong></td><td><strong>${esc(rule.name)}</strong><div class="code table-subline" title="${esc(rule.sql)}">${esc(rule.sql)}</div></td><td><span class="tag">${esc(rule.cluster)}</span></td>
+    <td>${formatSecondsCompact(rule.interval_seconds)} / ${formatSecondsCompact(rule.for_seconds)}</td><td><span class="tag ${rule.state === 'firing' ? 'error' : rule.state === 'pending' ? 'pending' : 'ok'}">${rule.enabled ? esc(rule.state) : 'disabled'}</span>${rule.last_error ? `<div class="error table-subline" title="${esc(rule.last_error)}">${esc(rule.last_error)}</div>` : ''}</td>
+    <td class="code" title="${esc(rule.last_value || '')}">${esc(rule.last_value || '—')}<div class="muted table-subline">${rule.last_evaluated_at ? date(rule.last_evaluated_at) : '尚未执行'}</div></td>
+    <td><div class="row-actions"><button class="ghost edit-alert-rule" data-id="${rule.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-alert-rule" data-id="${rule.id}">${icon('trash-2', 13)}<span>删除</span></button></div></td></tr>`).join('') : '<tr><td colspan="7" class="empty">暂无报警规则</td></tr>';
+  $$('.edit-alert-rule').forEach(button => button.onclick = () => openAlertRuleEditor(Number(button.dataset.id)));
+  $$('.delete-alert-rule').forEach(button => button.onclick = () => deleteAlertRule(Number(button.dataset.id)));
+}
+
+function renderAlertWebhooks() {
+  $('#alertWebhookRows').innerHTML = state.alertWebhooks.length ? state.alertWebhooks.map(webhook => `<tr><td><strong>#${webhook.id}</strong></td><td><strong>${esc(webhook.name)}</strong></td><td class="code" title="${esc(webhook.url_hint)}">${esc(webhook.url_hint)}</td><td><span class="tag ${webhook.auth_configured ? 'ok' : ''}">${webhook.auth_configured ? '已加密配置' : '无'}</span></td><td>${date(webhook.updated_at)}</td><td><div class="row-actions"><button class="ghost edit-alert-webhook" data-id="${webhook.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-alert-webhook" data-id="${webhook.id}">${icon('trash-2', 13)}<span>删除</span></button></div></td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无 Webhook</td></tr>';
+  $$('.edit-alert-webhook').forEach(button => button.onclick = () => openAlertWebhookEditor(Number(button.dataset.id)));
+  $$('.delete-alert-webhook').forEach(button => button.onclick = () => deleteAlertWebhook(Number(button.dataset.id)));
+}
+
+function renderAlertEvents(items) {
+  $('#alertEventRows').innerHTML = items.length ? items.map(item => `<tr><td>${date(item.created_at)}</td><td><strong>#${item.rule_id}</strong> ${esc(item.rule_name)}</td><td><span class="tag">${esc(item.cluster)}</span></td><td><span class="tag ${item.status === 'firing' ? 'error' : 'ok'}">${esc(item.status)}</span></td><td class="code">${esc(item.value || '—')}</td><td>${date(item.started_at)}${item.ended_at ? `<div class="muted table-subline">恢复 ${date(item.ended_at)}</div>` : ''}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无触发记录</td></tr>';
+}
+
+function renderAlertDeliveries(items) {
+  $('#alertDeliveryRows').innerHTML = items.length ? items.map(item => `<tr><td>${date(item.created_at)}</td><td><strong>#${item.rule_id}</strong> ${esc(item.rule_name)}</td><td>${esc(item.webhook_name)}</td><td><span class="tag ${item.status === 'sent' ? 'ok' : 'error'}">${esc(item.status)}</span></td><td>${item.http_status || '—'}</td><td class="code" title="${esc(item.error || item.response_body || '')}">${esc(item.error || item.response_body || '—')}</td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无发送记录</td></tr>';
+}
+
+$$('[data-alert-tab]').forEach(button => button.onclick = () => {
+  $$('[data-alert-tab]').forEach(item => item.classList.toggle('active', item === button));
+  $$('[data-alert-panel]').forEach(panel => panel.classList.toggle('hidden', panel.dataset.alertPanel !== button.dataset.alertTab));
+});
+
+$('#refreshAlerting').onclick = loadAlerting;
+$('#configureAlerting').onclick = () => {
+  const config = state.alertingConfig || {};
+  const form = $('#alertConfigForm'); form.reset();
+  form.elements.enabled.checked = Boolean(config.enabled);
+  form.elements.driver.value = config.driver || 'sqlite';
+  form.elements.historyLimit.value = config.history_limit || 300;
+  $('#updateAlertDatabaseLabel').classList.toggle('hidden', !config.configured);
+  $('#updateAlertDatabase').checked = !config.configured;
+  configureAlertDatabaseField(!config.configured);
+  $('#alertConfigError').textContent = '';
+  updateAlertConfigHelp();
+  $('#alertConfigDialog').showModal();
+};
+
+function configureAlertDatabaseField(enabled) {
+  $('#alertDatabaseField').classList.toggle('hidden', !enabled);
+  $('#alertConfigForm').elements.databaseDSN.required = enabled;
+  if (!enabled) $('#alertConfigForm').elements.databaseDSN.value = '';
+}
+function updateAlertConfigHelp() {
+  const driver = $('#alertConfigForm').elements.driver.value;
+  $('#alertConfigHelp').textContent = driver === 'sqlite' ? 'SQLite 示例：file:/data/alerts.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)' : driver === 'postgres' ? 'PostgreSQL 示例：postgres://user:password@db:5432/alerts?sslmode=require' : 'MySQL 示例：user:password@tcp(db:3306)/alerts?tls=true&timeout=5s';
+}
+$('#updateAlertDatabase').onchange = event => configureAlertDatabaseField(event.target.checked);
+$('#alertConfigForm').elements.driver.onchange = () => { updateAlertConfigHelp(); if (state.alertingConfig?.driver && state.alertingConfig.driver !== $('#alertConfigForm').elements.driver.value) { $('#updateAlertDatabase').checked = true; configureAlertDatabaseField(true); } };
+$$('.close-alert-config').forEach(button => button.onclick = () => $('#alertConfigDialog').close());
+$('#alertConfigForm').onsubmit = async event => {
+  event.preventDefault(); const form = event.currentTarget; const updateDatabase = $('#updateAlertDatabase').checked; const submit = $('#saveAlertConfig'); submit.disabled = true; $('#alertConfigError').textContent = '';
+  try {
+    const database = updateDatabase ? await encryptPayload({secret: form.elements.databaseDSN.value}) : {key:'',nonce:'',ciphertext:''};
+    await api('/api/alerting/config', {method:'PUT', body:JSON.stringify({enabled:form.elements.enabled.checked,driver:form.elements.driver.value,history_limit:Number(form.elements.historyLimit.value),update_database:updateDatabase,database})});
+    form.elements.databaseDSN.value = ''; $('#alertConfigDialog').close(); await loadAlerting(); toast('报警存储配置已更新');
+  } catch (error) { $('#alertConfigError').textContent = error.message; }
+  finally { submit.disabled = false; }
+};
+
+function configureAlertTargetFields(enabled) {
+  $('#alertTargetFields').classList.toggle('hidden', !enabled);
+  $('#alertWebhookForm').elements.url.required = enabled;
+  if (!enabled) { $('#alertWebhookForm').elements.url.value = ''; $('#alertWebhookForm').elements.authorization.value = ''; }
+}
+$('#newAlertWebhook').onclick = () => { const form=$('#alertWebhookForm');form.reset();form.elements.id.value='';$('#alertWebhookTitle').textContent='新建 Webhook';$('#updateAlertTargetLabel').classList.add('hidden');configureAlertTargetFields(true);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); };
+function openAlertWebhookEditor(id) { const item=state.alertWebhooks.find(value=>value.id===id);if(!item)return;const form=$('#alertWebhookForm');form.reset();form.elements.id.value=item.id;form.elements.name.value=item.name;$('#alertWebhookTitle').textContent=`编辑 #${item.id}`;$('#updateAlertTargetLabel').classList.remove('hidden');$('#updateAlertTarget').checked=false;configureAlertTargetFields(false);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); }
+$('#updateAlertTarget').onchange = event => configureAlertTargetFields(event.target.checked);
+$$('.close-alert-webhook').forEach(button => button.onclick = () => $('#alertWebhookDialog').close());
+$('#alertWebhookForm').onsubmit = async event => { event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const updateTarget=!id||$('#updateAlertTarget').checked;const submit=$('#saveAlertWebhook');submit.disabled=true;$('#alertWebhookError').textContent='';try{const target=updateTarget?await encryptPayload({url:form.elements.url.value,authorization:form.elements.authorization.value}):{key:'',nonce:'',ciphertext:''};await api(id?`/api/alerting/webhooks/${id}`:'/api/alerting/webhooks',{method:id?'PUT':'POST',body:JSON.stringify({name:form.elements.name.value,update_target:updateTarget,target})});form.elements.authorization.value='';form.elements.url.value='';$('#alertWebhookDialog').close();await loadAlerting();toast(id?'Webhook 已更新':'Webhook 已创建')}catch(error){$('#alertWebhookError').textContent=error.message}finally{submit.disabled=false}};
+async function deleteAlertWebhook(id){const item=state.alertWebhooks.find(value=>value.id===id);if(!item||!confirm(`确认删除 Webhook #${id} ${item.name}？`))return;try{await api(`/api/alerting/webhooks/${id}`,{method:'DELETE'});await loadAlerting();toast('Webhook 已删除')}catch(error){toast(error.message)}}
+
+function populateAlertRuleOptions(form) { form.elements.cluster.replaceChildren(...state.clusters.map(item=>new Option(item.alias,item.alias)));form.elements.webhookId.replaceChildren(new Option('不发送，仅记录',''),...state.alertWebhooks.map(item=>new Option(`#${item.id} ${item.name}`,String(item.id)))); }
+$('#newAlertRule').onclick = () => {const form=$('#alertRuleForm');form.reset();form.elements.id.value='';form.elements.intervalSeconds.value=60;form.elements.forSeconds.value=0;form.elements.enabled.checked=true;populateAlertRuleOptions(form);$('#alertRuleTitle').textContent='新建报警规则';$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();};
+function openAlertRuleEditor(id){const item=state.alertRules.find(value=>value.id===id);if(!item)return;const form=$('#alertRuleForm');form.reset();populateAlertRuleOptions(form);form.elements.id.value=item.id;form.elements.name.value=item.name;form.elements.cluster.value=item.cluster;form.elements.intervalSeconds.value=item.interval_seconds;form.elements.forSeconds.value=item.for_seconds;form.elements.webhookId.value=item.webhook_id?String(item.webhook_id):'';form.elements.enabled.checked=item.enabled;form.elements.sql.value=item.sql;$('#alertRuleTitle').textContent=`编辑规则 #${item.id}`;$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();}
+$$('.close-alert-rule').forEach(button => button.onclick = () => $('#alertRuleDialog').close());
+$('#alertRuleForm').onsubmit = async event => {event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const webhookId=form.elements.webhookId.value;const payload={name:form.elements.name.value,cluster:form.elements.cluster.value,sql:form.elements.sql.value,interval_seconds:Number(form.elements.intervalSeconds.value),for_seconds:Number(form.elements.forSeconds.value),webhook_id:webhookId?Number(webhookId):null,enabled:form.elements.enabled.checked};try{await api(id?`/api/alerting/rules/${id}`:'/api/alerting/rules',{method:id?'PUT':'POST',body:JSON.stringify(payload)});$('#alertRuleDialog').close();await loadAlerting();toast(id?'报警规则已更新':'报警规则已创建')}catch(error){$('#alertRuleError').textContent=error.message}};
+async function deleteAlertRule(id){const item=state.alertRules.find(value=>value.id===id);if(!item||!confirm(`确认删除报警规则 #${id} ${item.name}？`))return;try{await api(`/api/alerting/rules/${id}`,{method:'DELETE'});await loadAlerting();toast('报警规则已删除')}catch(error){toast(error.message)}}
+function formatSecondsCompact(input){const seconds=Number(input)||0;if(seconds===0)return '立即';if(seconds%86400===0)return `${seconds/86400}天`;if(seconds%3600===0)return `${seconds/3600}小时`;if(seconds%60===0)return `${seconds/60}分`;return `${seconds}秒`}
 
 async function loadUsers() {
   try {

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gcxixi/clickhouse-console/internal/alertconfig"
+	"github.com/gcxixi/clickhouse-console/internal/alerting"
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
 	"github.com/gcxixi/clickhouse-console/internal/clusterconfig"
 	"github.com/gcxixi/clickhouse-console/internal/config"
@@ -47,6 +50,55 @@ func main() {
 		log.Error("platform cluster store error", "error", err)
 		os.Exit(1)
 	}
+	platformAlerting, err := alertconfig.Open(cfg.DataDir, cfg.EncryptionKey)
+	if err != nil {
+		log.Error("platform alerting store error", "error", err)
+		os.Exit(1)
+	}
+	encryptionKey, err := clusterconfig.LoadEncryptionKey(cfg.DataDir, cfg.EncryptionKey)
+	if err != nil {
+		log.Error("alerting encryption key error", "error", err)
+		os.Exit(1)
+	}
+	codec, err := alerting.NewSecretCodec(encryptionKey)
+	if err != nil {
+		log.Error("alerting secret codec error", "error", err)
+		os.Exit(1)
+	}
+	alerts := alerting.NewService(nil, alerting.NewHTTPSender(cfg.Alerting.WebhookTimeout), codec, log)
+	defer alerts.Close()
+	var alertEnvironment *alertconfig.Config
+	alertStartupError := ""
+	if cfg.Alerting.Environment {
+		alertEnvironment = &alertconfig.Config{Enabled: cfg.Alerting.Enabled, Configured: cfg.Alerting.DSN != "", Driver: cfg.Alerting.Driver, DSN: cfg.Alerting.DSN, Source: "environment", HistoryLimit: cfg.Alerting.HistoryLimit}
+		if cfg.Alerting.Enabled {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			repository, openErr := alerting.OpenRepository(ctx, cfg.Alerting.Driver, cfg.Alerting.DSN)
+			cancel()
+			if openErr != nil {
+				log.Error("environment alerting database error", "error", openErr)
+				os.Exit(1)
+			}
+			alerts.Configure(repository, cfg.Alerting.HistoryLimit)
+		}
+	} else {
+		platformConfig, configErr := platformAlerting.Config()
+		if configErr != nil {
+			log.Error("platform alerting configuration error", "error", configErr)
+			os.Exit(1)
+		}
+		if platformConfig.Enabled {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			repository, openErr := alerting.OpenRepository(ctx, platformConfig.Driver, platformConfig.DSN)
+			cancel()
+			if openErr != nil {
+				alertStartupError = "unable to connect to configured alerting database; see server logs"
+				log.Error("platform alerting database unavailable", "error", openErr)
+			} else {
+				alerts.Configure(repository, platformConfig.HistoryLimit)
+			}
+		}
+	}
 	storedClusters, err := platformClusters.Configs()
 	if err != nil {
 		log.Error("platform cluster configuration error", "error", err)
@@ -66,7 +118,7 @@ func main() {
 		aliases[strings.ToLower(cluster.Alias)] = struct{}{}
 		clusters = append(clusters, server.Cluster{ID: cluster.ID, Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "platform", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout)})
 	}
-	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath, alerts, platformAlerting, alertEnvironment, alertStartupError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
 	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath, "clusters", len(clusters))
 	if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("server stopped", "error", err)
