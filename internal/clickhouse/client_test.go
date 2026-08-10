@@ -149,3 +149,36 @@ func TestExecuteQuery(t *testing.T) {
 		t.Fatalf("result metadata has frontend-incompatible field names: %s", response)
 	}
 }
+
+func TestDatabaseSchema(t *testing.T) {
+	var queries []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		queries = append(queries, query)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(query, "SHOW CREATE DATABASE") {
+			response, _ := json.Marshal(map[string]any{"data": []map[string]any{{"statement": "CREATE DATABASE `analytics'prod` ENGINE = Atomic"}}, "rows": 1})
+			_, _ = w.Write(response)
+			return
+		}
+		objects, _ := json.Marshal([][]string{
+			{"events", "MergeTree", "CREATE TABLE `analytics'prod`.events (id UInt64) ENGINE = MergeTree ORDER BY id"},
+			{"events_view", "View", "CREATE VIEW `analytics'prod`.events_view AS SELECT * FROM `analytics'prod`.events"},
+		})
+		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{"objects_json": string(objects)}}, "rows": 1})
+		_, _ = w.Write(response)
+	}))
+	defer ts.Close()
+	client := New(ts.URL, "", "", "default", 100, time.Second)
+	schema, err := client.DatabaseSchema(context.Background(), "analytics'prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(schema.DatabaseStatement, "CREATE DATABASE") || len(schema.Objects) != 2 || schema.Objects[1].Engine != "View" {
+		t.Fatalf("schema = %#v", schema)
+	}
+	if len(queries) != 2 || !strings.Contains(queries[0], "`analytics'prod`") || !strings.Contains(queries[1], "database = 'analytics\\'prod'") {
+		t.Fatalf("queries = %#v", queries)
+	}
+}

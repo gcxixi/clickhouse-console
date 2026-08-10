@@ -41,6 +41,15 @@ type StatementResult struct {
 	Rows      int    `json:"rows"`
 	ElapsedMS int64  `json:"elapsed_ms"`
 }
+type SchemaObject struct {
+	Name      string `json:"name"`
+	Engine    string `json:"engine"`
+	Statement string `json:"statement"`
+}
+type DatabaseSchema struct {
+	DatabaseStatement string         `json:"database_statement"`
+	Objects           []SchemaObject `json:"objects"`
+}
 type Monitoring struct {
 	GeneratedAt time.Time        `json:"generated_at"`
 	Metrics     []map[string]any `json:"metrics"`
@@ -326,6 +335,70 @@ func (c *Client) Ping(ctx context.Context) error {
 		return errors.New("unexpected ping response")
 	}
 	return nil
+}
+
+func (c *Client) DatabaseSchema(ctx context.Context, database string) (DatabaseSchema, error) {
+	if strings.TrimSpace(database) == "" {
+		return DatabaseSchema{}, errors.New("database is required")
+	}
+	if len(database) > 256 || strings.IndexByte(database, 0) >= 0 {
+		return DatabaseSchema{}, errors.New("invalid database name")
+	}
+	databaseResult, err := c.Execute(ctx, "SHOW CREATE DATABASE "+quoteIdentifier(database))
+	if err != nil {
+		return DatabaseSchema{}, err
+	}
+	databaseStatement, err := resultString(databaseResult, "statement")
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("read database definition: %w", err)
+	}
+	objectsSQL := "SELECT toJSONString(groupArray(tuple(name, engine, create_table_query))) AS objects_json FROM (" +
+		"SELECT name, engine, create_table_query FROM system.tables WHERE database = " + quoteString(database) +
+		" ORDER BY multiIf(engine IN ('View', 'MaterializedView', 'LiveView', 'WindowView'), 2, engine = 'Dictionary', 1, 0), name)"
+	objectsResult, err := c.Execute(ctx, objectsSQL)
+	if err != nil {
+		return DatabaseSchema{}, err
+	}
+	objectsJSON, err := resultString(objectsResult, "objects_json")
+	if err != nil {
+		return DatabaseSchema{}, fmt.Errorf("read database objects: %w", err)
+	}
+	var rows [][]string
+	if err = json.Unmarshal([]byte(objectsJSON), &rows); err != nil {
+		return DatabaseSchema{}, fmt.Errorf("decode database objects: %w", err)
+	}
+	objects := make([]SchemaObject, 0, len(rows))
+	for _, row := range rows {
+		if len(row) != 3 || strings.TrimSpace(row[2]) == "" {
+			return DatabaseSchema{}, errors.New("invalid database object definition")
+		}
+		objects = append(objects, SchemaObject{Name: row[0], Engine: row[1], Statement: row[2]})
+	}
+	return DatabaseSchema{DatabaseStatement: databaseStatement, Objects: objects}, nil
+}
+
+func resultString(result Result, key string) (string, error) {
+	if len(result.Data) != 1 {
+		return "", errors.New("unexpected ClickHouse response")
+	}
+	value, ok := result.Data[0][key]
+	if !ok {
+		return "", fmt.Errorf("missing %s", key)
+	}
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("invalid %s", key)
+	}
+	return text, nil
+}
+
+func quoteIdentifier(value string) string {
+	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+}
+
+func quoteString(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return "'" + strings.ReplaceAll(value, "'", "\\'") + "'"
 }
 
 func (c *Client) Monitor(ctx context.Context) (Monitoring, error) {

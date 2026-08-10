@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -86,6 +87,7 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("GET /api/health", s.auth(s.health))
 	m.HandleFunc("POST /api/cluster", s.auth(s.switchCluster))
 	m.HandleFunc("POST /api/query", s.auth(s.query))
+	m.HandleFunc("GET /api/schema/export", s.auth(s.exportDatabaseSchema))
 	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
 	m.HandleFunc("GET /api/clusters", s.admin(s.listClusters))
 	m.HandleFunc("GET /api/clusters/transport-key", s.admin(s.transportKey))
@@ -290,6 +292,78 @@ func authorizeSQLKind(role, kind string) error {
 		return errors.New("admin role is required for DDL")
 	}
 	return nil
+}
+func (s *Server) exportDatabaseSchema(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	database := r.URL.Query().Get("database")
+	if strings.TrimSpace(database) == "" || len(database) > 256 || strings.IndexByte(database, 0) >= 0 {
+		writeErr(w, 400, "valid database is required")
+		return
+	}
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	start := time.Now()
+	schema, err := client.DatabaseSchema(r.Context(), database)
+	audit := store.Audit{User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "schema.export", Statement: database, DurationMS: time.Since(start).Milliseconds(), RemoteAddr: remote(r), Status: "ok"}
+	if err != nil {
+		audit.Status = "error"
+		audit.Error = truncate(err.Error(), 1000)
+		s.db.AddAudit(audit)
+		writeErr(w, 502, err.Error())
+		return
+	}
+	audit.Rows = len(schema.Objects)
+	s.db.AddAudit(audit)
+	filename := exportFilename(database)
+	w.Header().Set("Content-Type", "application/sql; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("X-Export-Filename", filename)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, renderDatabaseSchema(ss.ActiveCluster, database, schema, time.Now().UTC()))
+}
+
+func renderDatabaseSchema(cluster, database string, schema ch.DatabaseSchema, generatedAt time.Time) string {
+	var output strings.Builder
+	output.WriteString("-- ClickHouse database schema export\n")
+	output.WriteString("-- Cluster: " + singleLineComment(cluster) + "\n")
+	output.WriteString("-- Database: " + singleLineComment(database) + "\n")
+	output.WriteString("-- Generated at: " + generatedAt.Format(time.RFC3339) + "\n\n")
+	appendDDL := func(statement string) {
+		statement = strings.TrimSpace(statement)
+		output.WriteString(statement)
+		if !strings.HasSuffix(statement, ";") {
+			output.WriteByte(';')
+		}
+		output.WriteString("\n\n")
+	}
+	appendDDL(schema.DatabaseStatement)
+	for _, object := range schema.Objects {
+		output.WriteString("-- " + singleLineComment(object.Engine) + ": " + singleLineComment(object.Name) + "\n")
+		appendDDL(object.Statement)
+	}
+	return output.String()
+}
+
+func singleLineComment(value string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(value)
+}
+
+func exportFilename(database string) string {
+	var name strings.Builder
+	for _, r := range database {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			name.WriteRune(r)
+		} else {
+			name.WriteByte('_')
+		}
+	}
+	if name.Len() == 0 {
+		name.WriteString("database")
+	}
+	return name.String() + "-schema.sql"
 }
 func (s *Server) monitor(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
