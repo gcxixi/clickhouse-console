@@ -345,11 +345,11 @@ func TestExportDatabaseSchema(t *testing.T) {
 			_, _ = io.WriteString(w, `{"data":[{"statement":"CREATE DATABASE analytics ENGINE = Atomic"}],"rows":1}`)
 			return
 		}
-		objects, _ := json.Marshal([][]string{
-			{"events", "MergeTree", "CREATE TABLE analytics.events (id UInt64) ENGINE = MergeTree ORDER BY id"},
-			{"daily", "View", "CREATE VIEW analytics.daily AS SELECT count() FROM analytics.events"},
-		})
-		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{"objects_json": string(objects)}}, "rows": 1})
+		response, _ := json.Marshal(map[string]any{"data": []map[string]any{{
+			"names":      []string{"events", "daily"},
+			"engines":    []string{"MergeTree", "View"},
+			"statements": []string{"CREATE TABLE analytics.events (id UInt64) ENGINE = MergeTree ORDER BY id", "CREATE VIEW analytics.daily AS SELECT count() FROM analytics.events"},
+		}}, "rows": 1})
 		_, _ = w.Write(response)
 	}))
 	defer clickhouseServer.Close()
