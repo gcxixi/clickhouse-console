@@ -9,6 +9,8 @@ const lucideIcons = {
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
   'bell-ring': '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/><path d="M4 2C2.8 3.7 2 5.7 2 8M20 2c1.2 1.7 2 3.7 2 6"/>',
   'arrow-right': '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
+  'chevron-down': '<path d="m6 9 6 6 6-6"/>',
+  'chevron-up': '<path d="m18 15-6-6-6 6"/>',
   'code-xml': '<path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
@@ -586,7 +588,7 @@ async function openTableInWorkbench(database, table) {
   catch (error) { toast(error.message); }
 }
 
-async function copyText(text) {
+async function copyText(text, successMessage = '建表语句已复制') {
   try {
     if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
     else {
@@ -599,7 +601,7 @@ async function copyText(text) {
       document.execCommand('copy');
       helper.remove();
     }
-    toast('建表语句已复制');
+    toast(successMessage);
   } catch { toast('复制失败，请手动复制'); }
 }
 
@@ -869,11 +871,57 @@ $('#userForm').onsubmit = async event => {
 async function loadAudit() {
   try {
     const rows = await api('/api/audit?limit=500');
-    $('#auditRows').innerHTML = rows.map(row => `<tr><td>${date(row.At)}</td><td>${esc(row.User || '—')}</td><td><span class="tag">${esc(row.Cluster || '—')}</span></td><td>${esc(row.Action)}</td><td><span class="tag ${row.Status === 'ok' ? 'ok' : 'error'}">${esc(row.Status)}</span></td><td>${row.DurationMS || 0} ms</td><td class="code" title="${esc(row.Error || row.Statement)}">${esc(row.Error || row.Statement || '—')}</td></tr>`).join('');
+    $('#auditRows').innerHTML = rows.map(row => {
+      const detail = String(row.Error || row.Statement || '—');
+      return `<tr><td>${date(row.At)}</td><td>${esc(row.User || '—')}</td><td><span class="tag">${esc(row.Cluster || '—')}</span></td><td>${esc(row.Action)}</td><td><span class="tag ${row.Status === 'ok' ? 'ok' : 'error'}">${esc(row.Status)}</span></td><td>${row.DurationMS || 0} ms</td><td class="code audit-detail"><div class="audit-statement"><span class="audit-statement-text">${esc(detail)}</span><span class="audit-statement-actions"><span class="audit-icon-action audit-expand hidden" role="button" tabindex="0" data-audit-action="expand" title="展开完整内容" aria-label="展开完整内容" aria-expanded="false">${icon('chevron-down')}</span><span class="audit-icon-action" role="button" tabindex="0" data-audit-action="copy" title="复制完整内容" aria-label="复制完整内容">${icon('copy')}</span></span></div></td></tr>`;
+    }).join('');
+    requestAnimationFrame(refreshAuditExpandControls);
   } catch (error) { toast(error.message); }
 }
 
 $('#refreshAudit').onclick = loadAudit;
+
+function refreshAuditExpandControls() {
+  $$('#auditRows .audit-statement').forEach(container => {
+    const text = container.querySelector('.audit-statement-text');
+    const control = container.querySelector('.audit-expand');
+    const expanded = text.classList.contains('expanded');
+    text.classList.remove('expanded');
+    const truncated = text.scrollWidth > text.clientWidth + 1;
+    if (expanded && truncated) text.classList.add('expanded');
+    control.classList.toggle('hidden', !truncated);
+    if (!truncated) {
+      control.setAttribute('aria-expanded', 'false');
+      control.setAttribute('aria-label', '展开完整内容');
+      control.title = '展开完整内容';
+      control.innerHTML = icon('chevron-down');
+    }
+  });
+}
+
+function handleAuditAction(target) {
+  const action = target.closest('[data-audit-action]');
+  if (!action) return;
+  const text = action.closest('.audit-statement').querySelector('.audit-statement-text');
+  if (action.dataset.auditAction === 'copy') {
+    copyText(text.textContent, '审计详情已复制');
+    return;
+  }
+  const expanded = text.classList.toggle('expanded');
+  action.setAttribute('aria-expanded', String(expanded));
+  action.setAttribute('aria-label', expanded ? '收起完整内容' : '展开完整内容');
+  action.title = expanded ? '收起完整内容' : '展开完整内容';
+  action.innerHTML = icon(expanded ? 'chevron-up' : 'chevron-down');
+}
+
+$('#auditRows').addEventListener('click', event => handleAuditAction(event.target));
+$('#auditRows').addEventListener('keydown', event => {
+  if ((event.key === 'Enter' || event.key === ' ') && event.target.closest('[data-audit-action]')) {
+    event.preventDefault();
+    handleAuditAction(event.target);
+  }
+});
+window.addEventListener('resize', refreshAuditExpandControls);
 
 function monitorCacheKey(cluster) { return `clickhouse-console:${apiRoot.pathname}:monitor:${cluster}`; }
 function readMonitorCache(cluster) {
