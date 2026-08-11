@@ -304,6 +304,8 @@ function resetQueryResult() {
   $('#resultMeta').textContent = '等待执行';
   $('#resultColumns').className = 'result-column-controls hidden';
   $('#resultColumns').replaceChildren();
+  $('#resultExportFormat').disabled = true;
+  $('#exportResult').disabled = true;
   $('#result').className = 'empty';
   $('#result').textContent = '确认并运行 SQL 后，结果将显示在这里';
 }
@@ -423,10 +425,14 @@ function renderResult(result) {
     state.resultColumnVisibility = [];
     $('#resultColumns').className = 'result-column-controls hidden';
     $('#resultColumns').replaceChildren();
+    $('#resultExportFormat').disabled = true;
+    $('#exportResult').disabled = true;
     $('#result').className = 'empty';
     $('#result').textContent = result.kind === 'batch' ? `${result.statement_count} 条语句已按顺序执行成功` : '命令执行成功';
     return;
   }
+  $('#resultExportFormat').disabled = false;
+  $('#exportResult').disabled = false;
   state.resultColumnVisibility = readResultColumnVisibility(result.meta);
   renderResultColumnControls(result.meta);
   renderResultTable();
@@ -488,6 +494,27 @@ $('#result').addEventListener('mouseover', event => {
   if (cell.scrollWidth > cell.clientWidth) cell.title = cell.textContent;
   else cell.removeAttribute('title');
 });
+
+function exportQueryResult() {
+  const result = state.queryResult;
+  const format = $('#resultExportFormat').value;
+  const config = ResultExport.formats[format];
+  if (!result?.meta?.length || !config) return;
+  const content = ResultExport.serialize(result, format);
+  const blob = new Blob([content], {type: config.mime});
+  const objectURL = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  link.href = objectURL;
+  link.download = `${ResultExport.safeName(state.activeCluster)}-query-${stamp}.${config.extension}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectURL);
+  toast(`已导出 ${result.data?.length || 0} 行 ${format}`);
+}
+
+$('#exportResult').onclick = exportQueryResult;
 
 async function loadDatabases() {
   try {
