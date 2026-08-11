@@ -14,6 +14,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --check internal/server/web/app.js
+      - run: node --check internal/server/web/result-export.js
+      - run: node --test internal/server/web/result-export.test.cjs
       - run: go vet ./...
       - run: go test -race ./...
       - run: go build -trimpath ./cmd/console
