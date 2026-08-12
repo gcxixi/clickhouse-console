@@ -70,6 +70,7 @@ docker run --rm --user 0:0 \
 | `CLICKHOUSE_DATABASE` | `default` | 默认数据库 |
 | `CH_CONSOLE_QUERY_TIMEOUT` | `60s` | 单次查询超时 |
 | `CH_CONSOLE_MAX_ROWS` | `1000` | 最大返回行数，范围 1–100000 |
+| `CH_CONSOLE_MAX_RESULT_BYTES` | `268435456` | ClickHouse 单次响应大小上限（字节），默认 256 MiB，范围 1 MiB–2 GiB |
 | `CH_CONSOLE_ENABLE_GRANT` | `false` | 是否允许管理员执行 `GRANT` / `REVOKE`；修改后需重启服务 |
 | `CH_CONSOLE_ALERTING_ENABLED` | `false` | 是否启用环境变量管理的报警调度 |
 | `CH_CONSOLE_ALERTING_DRIVER` | 空 | 报警存储：`sqlite`、`postgres` 或 `mysql`；留空时允许管理员在平台配置 |

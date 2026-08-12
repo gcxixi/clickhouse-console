@@ -27,6 +27,7 @@ type Config struct {
 	EncryptionKey             string
 	QueryTimeout              time.Duration
 	MaxRows                   int
+	MaxResultBytes            int64
 	EnableGrant               bool
 	Alerting                  Alerting
 }
@@ -61,6 +62,10 @@ func Load() (Config, error) {
 	c.MaxRows, err = strconv.Atoi(env("CH_CONSOLE_MAX_ROWS", "1000"))
 	if err != nil || c.MaxRows < 1 || c.MaxRows > 100000 {
 		return c, fmt.Errorf("CH_CONSOLE_MAX_ROWS must be between 1 and 100000")
+	}
+	c.MaxResultBytes, err = strconv.ParseInt(env("CH_CONSOLE_MAX_RESULT_BYTES", "268435456"), 10, 64)
+	if err != nil || c.MaxResultBytes < 1<<20 || c.MaxResultBytes > 2<<30 {
+		return c, fmt.Errorf("CH_CONSOLE_MAX_RESULT_BYTES must be between 1048576 and 2147483648")
 	}
 	c.EnableGrant, err = strconv.ParseBool(env("CH_CONSOLE_ENABLE_GRANT", "false"))
 	if err != nil {

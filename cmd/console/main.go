@@ -108,7 +108,7 @@ func main() {
 	aliases := make(map[string]struct{}, cap(clusters))
 	for _, cluster := range cfg.Clusters {
 		aliases[strings.ToLower(cluster.Alias)] = struct{}{}
-		clusters = append(clusters, server.Cluster{Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "environment", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout)})
+		clusters = append(clusters, server.Cluster{Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "environment", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout, ch.WithMaxResultBytes(cfg.MaxResultBytes))})
 	}
 	for _, cluster := range storedClusters {
 		if _, exists := aliases[strings.ToLower(cluster.Alias)]; exists {
@@ -116,9 +116,9 @@ func main() {
 			os.Exit(1)
 		}
 		aliases[strings.ToLower(cluster.Alias)] = struct{}{}
-		clusters = append(clusters, server.Cluster{ID: cluster.ID, Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "platform", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout)})
+		clusters = append(clusters, server.Cluster{ID: cluster.ID, Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "platform", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout, ch.WithMaxResultBytes(cfg.MaxResultBytes))})
 	}
-	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath, alerts, platformAlerting, alertEnvironment, alertStartupError, server.SecurityOptions{EnableGrant: cfg.EnableGrant}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath, alerts, platformAlerting, alertEnvironment, alertStartupError, server.Options{EnableGrant: cfg.EnableGrant, MaxResultBytes: cfg.MaxResultBytes}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
 	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath, "clusters", len(clusters))
 	if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("server stopped", "error", err)

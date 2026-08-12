@@ -152,6 +152,22 @@ func TestExecuteQuery(t *testing.T) {
 	}
 }
 
+func TestExecuteReportsResponseSizeLimitInsteadOfJSONDecodeError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"value":"this response is intentionally too large"}],"rows":1}`)
+	}))
+	defer ts.Close()
+
+	client := New(ts.URL, "", "", "default", 100, time.Second, WithMaxResultBytes(32))
+	_, err := client.Execute(context.Background(), "SELECT value")
+	if err == nil || !strings.Contains(err.Error(), "CH_CONSOLE_MAX_RESULT_BYTES") {
+		t.Fatalf("Execute() error = %v; want an actionable response-size error", err)
+	}
+	if strings.Contains(err.Error(), "unexpected end of JSON") {
+		t.Fatalf("Execute() exposed a misleading JSON truncation error: %v", err)
+	}
+}
+
 func TestDryRunUsesSemanticAnalysisForSelectAndSyntaxForDDL(t *testing.T) {
 	var queries []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

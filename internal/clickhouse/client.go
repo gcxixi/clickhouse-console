@@ -17,9 +17,23 @@ import (
 type Client struct {
 	endpoint, user, password, database string
 	maxRows                            int
+	maxResultBytes                     int64
 	timeout                            time.Duration
 	http                               *http.Client
 }
+
+const defaultMaxResultBytes int64 = 256 << 20
+
+type Option func(*Client)
+
+func WithMaxResultBytes(limit int64) Option {
+	return func(c *Client) {
+		if limit > 0 {
+			c.maxResultBytes = limit
+		}
+	}
+}
+
 type Column struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
@@ -64,8 +78,12 @@ var (
 	alterMutation = regexp.MustCompile(`(?is)^ALTER\s+TABLE\b.*\b(UPDATE|DELETE)\b`)
 )
 
-func New(endpoint, user, password, database string, maxRows int, timeout time.Duration) *Client {
-	return &Client{endpoint: strings.TrimSpace(endpoint), user: user, password: password, database: database, maxRows: maxRows, timeout: timeout, http: &http.Client{Timeout: timeout + 5*time.Second}}
+func New(endpoint, user, password, database string, maxRows int, timeout time.Duration, options ...Option) *Client {
+	c := &Client{endpoint: strings.TrimSpace(endpoint), user: user, password: password, database: database, maxRows: maxRows, maxResultBytes: defaultMaxResultBytes, timeout: timeout, http: &http.Client{Timeout: timeout + 5*time.Second}}
+	for _, option := range options {
+		option(c)
+	}
+	return c
 }
 func Classify(sql string) (string, error) {
 	statements, err := SplitStatements(sql)
@@ -311,9 +329,12 @@ func (c *Client) Execute(ctx context.Context, sql string) (Result, error) {
 		return Result{}, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxResultBytes+1))
 	if err != nil {
 		return Result{}, err
+	}
+	if int64(len(body)) > c.maxResultBytes {
+		return Result{}, fmt.Errorf("ClickHouse response exceeds configured limit (%d bytes); reduce LIMIT or increase CH_CONSOLE_MAX_RESULT_BYTES", c.maxResultBytes)
 	}
 	if resp.StatusCode >= 300 {
 		return Result{}, fmt.Errorf("ClickHouse: %s", strings.TrimSpace(string(body)))

@@ -49,6 +49,7 @@ type Server struct {
 	clusters          map[string]Cluster
 	aliases           []string
 	maxRows           int
+	maxResultBytes    int64
 	timeout           time.Duration
 	log               *slog.Logger
 	mu                sync.RWMutex
@@ -65,11 +66,14 @@ type Server struct {
 	enableGrant       bool
 }
 
-type SecurityOptions struct {
-	EnableGrant bool
+type Options struct {
+	EnableGrant    bool
+	MaxResultBytes int64
 }
 
-func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string, alerts *alerting.Service, alertConfig *alertconfig.Store, alertEnvironment *alertconfig.Config, alertStartupError string, security ...SecurityOptions) http.Handler {
+type SecurityOptions = Options
+
+func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string, alerts *alerting.Service, alertConfig *alertconfig.Store, alertEnvironment *alertconfig.Config, alertStartupError string, options ...Options) http.Handler {
 	if len(configured) == 0 {
 		panic("at least one ClickHouse cluster is required")
 	}
@@ -78,8 +82,9 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 		cookiePath = basePath + "/"
 	}
 	s := &Server{db: db, platform: platform, clusters: make(map[string]Cluster, len(configured)), aliases: make([]string, 0, len(configured)), maxRows: maxRows, timeout: timeout, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath, alerts: alerts, alertConfig: alertConfig, alertEnvironment: alertEnvironment, alertStartupError: alertStartupError}
-	if len(security) > 0 {
-		s.enableGrant = security[0].EnableGrant
+	if len(options) > 0 {
+		s.enableGrant = options[0].EnableGrant
+		s.maxResultBytes = options[0].MaxResultBytes
 	}
 	for _, cluster := range configured {
 		s.clusters[cluster.Alias] = cluster
@@ -521,7 +526,7 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := s.platform.Create(clusterconfig.Input{Alias: in.Alias, URL: in.URL, Database: in.Database, User: user, Password: password})
 	if err == nil {
-		cluster := Cluster{ID: created.ID, Alias: created.Alias, URL: created.URL, Database: created.Database, Source: "platform", Client: ch.New(created.URL, user, password, created.Database, s.maxRows, s.timeout)}
+		cluster := Cluster{ID: created.ID, Alias: created.Alias, URL: created.URL, Database: created.Database, Source: "platform", Client: ch.New(created.URL, user, password, created.Database, s.maxRows, s.timeout, ch.WithMaxResultBytes(s.maxResultBytes))}
 		s.clusters[created.Alias] = cluster
 		s.aliases = append(s.aliases, created.Alias)
 	}
@@ -564,7 +569,7 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, config, err := s.platform.Update(current.ID, clusterconfig.Input{Alias: current.Alias, URL: in.URL, Database: in.Database, User: user, Password: password}, in.UpdateCredentials)
 	if err == nil {
-		s.clusters[current.Alias] = Cluster{ID: updated.ID, Alias: updated.Alias, URL: updated.URL, Database: updated.Database, Source: "platform", Client: ch.New(updated.URL, config.User, config.Password, updated.Database, s.maxRows, s.timeout)}
+		s.clusters[current.Alias] = Cluster{ID: updated.ID, Alias: updated.Alias, URL: updated.URL, Database: updated.Database, Source: "platform", Client: ch.New(updated.URL, config.User, config.Password, updated.Database, s.maxRows, s.timeout, ch.WithMaxResultBytes(s.maxResultBytes))}
 	}
 	s.mu.Unlock()
 	if err != nil {

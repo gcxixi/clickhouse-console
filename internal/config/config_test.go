@@ -17,6 +17,18 @@ func TestLoadGrantFeatureFlag(t *testing.T) {
 	}
 }
 
+func TestLoadMaxResultBytes(t *testing.T) {
+	t.Setenv("CH_CONSOLE_MAX_RESULT_BYTES", "536870912")
+	cfg, err := Load()
+	if err != nil || cfg.MaxResultBytes != 536870912 {
+		t.Fatalf("Load() MaxResultBytes = %d, %v", cfg.MaxResultBytes, err)
+	}
+	t.Setenv("CH_CONSOLE_MAX_RESULT_BYTES", "1024")
+	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "CH_CONSOLE_MAX_RESULT_BYTES") {
+		t.Fatalf("invalid response limit error = %v", err)
+	}
+}
+
 func TestNormalizeBasePath(t *testing.T) {
 	cases := map[string]string{"": "", "/": "", "/clickhouse": "/clickhouse", "/clickhouse/": "/clickhouse", " /tools/ch ": "/tools/ch"}
 	for input, want := range cases {
