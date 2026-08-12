@@ -62,9 +62,14 @@ type Server struct {
 	alertConfig       *alertconfig.Store
 	alertEnvironment  *alertconfig.Config
 	alertStartupError string
+	enableGrant       bool
 }
 
-func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string, alerts *alerting.Service, alertConfig *alertconfig.Store, alertEnvironment *alertconfig.Config, alertStartupError string) http.Handler {
+type SecurityOptions struct {
+	EnableGrant bool
+}
+
+func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, maxRows int, timeout time.Duration, log *slog.Logger, basePath string, alerts *alerting.Service, alertConfig *alertconfig.Store, alertEnvironment *alertconfig.Config, alertStartupError string, security ...SecurityOptions) http.Handler {
 	if len(configured) == 0 {
 		panic("at least one ClickHouse cluster is required")
 	}
@@ -73,6 +78,9 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 		cookiePath = basePath + "/"
 	}
 	s := &Server{db: db, platform: platform, clusters: make(map[string]Cluster, len(configured)), aliases: make([]string, 0, len(configured)), maxRows: maxRows, timeout: timeout, log: log, sessions: map[string]session{}, basePath: basePath, cookiePath: cookiePath, alerts: alerts, alertConfig: alertConfig, alertEnvironment: alertEnvironment, alertStartupError: alertStartupError}
+	if len(security) > 0 {
+		s.enableGrant = security[0].EnableGrant
+	}
 	for _, cluster := range configured {
 		s.clusters[cluster.Alias] = cluster
 		s.aliases = append(s.aliases, cluster.Alias)
@@ -239,7 +247,7 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), err))
 			return
 		}
-		if err = authorizeSQLKind(ss.User.Role, kinds[i]); err != nil {
+		if err = authorizeSQLKind(ss.User.Role, kinds[i], s.enableGrant); err != nil {
 			writeErr(w, 403, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), err))
 			return
 		}
@@ -285,7 +293,16 @@ func (s *Server) query(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, final)
 }
 
-func authorizeSQLKind(role, kind string) error {
+func authorizeSQLKind(role, kind string, grantEnabled ...bool) error {
+	if kind == "grant" {
+		if len(grantEnabled) == 0 || !grantEnabled[0] {
+			return errors.New("GRANT and REVOKE are disabled; set CH_CONSOLE_ENABLE_GRANT=true to enable them")
+		}
+		if role != "admin" {
+			return errors.New("admin role is required for GRANT and REVOKE")
+		}
+		return nil
+	}
 	if role == "viewer" && kind != "query" {
 		return errors.New("viewer role can only run read queries")
 	}
@@ -321,7 +338,7 @@ func (s *Server) dryRun(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), classifyErr))
 			return
 		}
-		if authorizeErr := authorizeSQLKind(ss.User.Role, kind); authorizeErr != nil {
+		if authorizeErr := authorizeSQLKind(ss.User.Role, kind, s.enableGrant); authorizeErr != nil {
 			writeErr(w, 403, fmt.Sprintf("statement %d/%d: %v", i+1, len(statements), authorizeErr))
 			return
 		}

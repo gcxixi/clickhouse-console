@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestLoadGrantFeatureFlag(t *testing.T) {
+	t.Setenv("CH_CONSOLE_ENABLE_GRANT", "true")
+	cfg, err := Load()
+	if err != nil || !cfg.EnableGrant {
+		t.Fatalf("Load() EnableGrant = %v, %v; want true", cfg.EnableGrant, err)
+	}
+	t.Setenv("CH_CONSOLE_ENABLE_GRANT", "invalid")
+	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "CH_CONSOLE_ENABLE_GRANT") {
+		t.Fatalf("invalid feature flag error = %v", err)
+	}
+}
+
 func TestNormalizeBasePath(t *testing.T) {
 	cases := map[string]string{"": "", "/": "", "/clickhouse": "/clickhouse", "/clickhouse/": "/clickhouse", " /tools/ch ": "/tools/ch"}
 	for input, want := range cases {

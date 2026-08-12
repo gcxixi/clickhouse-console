@@ -97,6 +97,8 @@ func Classify(sql string) (string, error) {
 		return "ddl", nil
 	case "CREATE", "DROP", "TRUNCATE", "RENAME", "ATTACH", "DETACH", "SYSTEM", "KILL":
 		return "ddl", nil
+	case "GRANT", "REVOKE":
+		return "grant", nil
 	default:
 		return "", fmt.Errorf("unsupported SQL statement: %s", w)
 	}

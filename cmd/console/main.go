@@ -118,7 +118,7 @@ func main() {
 		aliases[strings.ToLower(cluster.Alias)] = struct{}{}
 		clusters = append(clusters, server.Cluster{ID: cluster.ID, Alias: cluster.Alias, URL: cluster.URL, Database: cluster.Database, Source: "platform", Client: ch.New(cluster.URL, cluster.User, cluster.Password, cluster.Database, cfg.MaxRows, cfg.QueryTimeout)})
 	}
-	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath, alerts, platformAlerting, alertEnvironment, alertStartupError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{Addr: cfg.Listen, Handler: server.New(db, platformClusters, clusters, cfg.MaxRows, cfg.QueryTimeout, log, cfg.BasePath, alerts, platformAlerting, alertEnvironment, alertStartupError, server.SecurityOptions{EnableGrant: cfg.EnableGrant}), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: cfg.QueryTimeout + 10*time.Second, IdleTimeout: 90 * time.Second}
 	log.Info("clickhouse console listening", "address", cfg.Listen, "base_path", cfg.BasePath, "clusters", len(clusters))
 	if err = srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("server stopped", "error", err)
