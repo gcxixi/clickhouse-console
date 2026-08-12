@@ -336,6 +336,65 @@ func TestBatchSQLExecutionAndRolePreflight(t *testing.T) {
 	}
 }
 
+func TestGrantFeatureFlagAndRoleAuthorization(t *testing.T) {
+	var executed int
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		executed++
+	}))
+	defer clickhouseServer.Close()
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateUser("editor", "editor-password-123", "editor"); err != nil {
+		t.Fatal(err)
+	}
+	newHandler := func(enabled bool) http.Handler {
+		return New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "", SecurityOptions{EnableGrant: enabled})
+	}
+	requestGrant := func(handler http.Handler, username, password string) *httptest.ResponseRecorder {
+		loginBody, _ := json.Marshal(map[string]string{"username": username, "password": password})
+		loginRequest := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(loginBody))
+		loginResponse := httptest.NewRecorder()
+		handler.ServeHTTP(loginResponse, loginRequest)
+		var session struct {
+			CSRF string `json:"csrf"`
+		}
+		if err := json.Unmarshal(loginResponse.Body.Bytes(), &session); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(map[string]string{"sql": "GRANT SELECT ON default.* TO analyst"})
+		req := httptest.NewRequest(http.MethodPost, "/api/query", bytes.NewReader(body))
+		req.AddCookie(loginResponse.Result().Cookies()[0])
+		req.Header.Set("X-CSRF-Token", session.CSRF)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if response := requestGrant(newHandler(false), "admin", "test-password-123"); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "CH_CONSOLE_ENABLE_GRANT") {
+		t.Fatalf("disabled GRANT = %d: %s", response.Code, response.Body.String())
+	}
+	if executed != 0 {
+		t.Fatalf("disabled GRANT reached ClickHouse %d times", executed)
+	}
+	if response := requestGrant(newHandler(true), "editor", "editor-password-123"); response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "admin role") {
+		t.Fatalf("editor GRANT = %d: %s", response.Code, response.Body.String())
+	}
+	if executed != 0 {
+		t.Fatalf("editor GRANT reached ClickHouse %d times", executed)
+	}
+	if response := requestGrant(newHandler(true), "admin", "test-password-123"); response.Code != http.StatusOK {
+		t.Fatalf("enabled admin GRANT = %d: %s", response.Code, response.Body.String())
+	}
+	if executed != 1 {
+		t.Fatalf("enabled admin GRANT executions = %d; want 1", executed)
+	}
+	audits := db.Audits(10)
+	if len(audits) == 0 || audits[0].Action != "grant" || audits[0].Status != "ok" {
+		t.Fatalf("GRANT audit = %#v", audits)
+	}
+}
+
 func TestDryRunDoesNotExecuteOriginalStatements(t *testing.T) {
 	var checked []string
 	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

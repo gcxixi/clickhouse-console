@@ -70,6 +70,7 @@ docker run --rm --user 0:0 \
 | `CLICKHOUSE_DATABASE` | `default` | 默认数据库 |
 | `CH_CONSOLE_QUERY_TIMEOUT` | `60s` | 单次查询超时 |
 | `CH_CONSOLE_MAX_ROWS` | `1000` | 最大返回行数，范围 1–100000 |
+| `CH_CONSOLE_ENABLE_GRANT` | `false` | 是否允许管理员执行 `GRANT` / `REVOKE`；修改后需重启服务 |
 | `CH_CONSOLE_ALERTING_ENABLED` | `false` | 是否启用环境变量管理的报警调度 |
 | `CH_CONSOLE_ALERTING_DRIVER` | 空 | 报警存储：`sqlite`、`postgres` 或 `mysql`；留空时允许管理员在平台配置 |
 | `CH_CONSOLE_ALERTING_DSN` | 空 | 报警数据库连接串，仅从环境读取且不会通过 API 返回 |
@@ -144,6 +145,7 @@ gitleaks git --redact --no-banner
 - 查询审计会保留 SQL 文本（最多 2,000 字符），不要在 SQL 中直接写密码、token 或其他秘密。
 - 批量 SQL 会先拆分并逐条完成权限预检，随后按顺序执行；任何一条失败都会停止，已经成功执行的 DDL 不会自动回滚。批量查询只展示最后一条查询的结果，每条语句的类型、耗时和行数保留在 API 响应的 `statements` 中。
 - Dry Run 不执行原始语句：`SELECT` / `WITH` 使用 ClickHouse Query Tree 做表、列、函数和类型语义分析，DDL / DML 使用 AST 做语法检查。由于 ClickHouse 没有通用且无副作用的 DDL 语义预执行，Dry Run 通过不代表 DDL 数据类型、引擎、权限或运行时条件一定可执行，实际权限仍会在 Dry Run 和运行前分别校验。
+- `GRANT` / `REVOKE` 默认禁用。仅当启动环境设置 `CH_CONSOLE_ENABLE_GRANT=true` 时，管理员才能执行；Viewer 和 Editor 始终无权执行。Console 的开关不能替代 ClickHouse 自身授权，请继续对连接账号使用最小权限。
 
 ## License
 

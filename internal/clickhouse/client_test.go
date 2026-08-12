@@ -16,6 +16,8 @@ func TestClassify(t *testing.T) {
 	cases := map[string]string{"SELECT 1": "query", "WITH 1 AS x SELECT x": "query", "INSERT INTO x VALUES (1)": "dml", "ALTER TABLE x DELETE WHERE 1": "dml"}
 	cases["ALTER TABLE x UPDATE value = 'done' WHERE id = 1"] = "dml"
 	cases["SYSTEM FLUSH LOGS"] = "ddl"
+	cases["GRANT SELECT ON db.* TO analyst"] = "grant"
+	cases["REVOKE SELECT ON db.* FROM analyst"] = "grant"
 	cases["SELECT 'a;b' AS value"] = "query"
 	cases["SELECT 1 /* ; is part of a comment */"] = "query"
 	for sql, want := range cases {
@@ -24,7 +26,7 @@ func TestClassify(t *testing.T) {
 			t.Fatalf("Classify(%q)=%q,%v; want %q", sql, got, err, want)
 		}
 	}
-	for _, sql := range []string{"", "SELECT 1; DROP TABLE x", "GRANT ALL ON *.* TO x"} {
+	for _, sql := range []string{"", "SELECT 1; DROP TABLE x"} {
 		if _, err := Classify(sql); err == nil {
 			t.Fatalf("Classify(%q) should fail", sql)
 		}
