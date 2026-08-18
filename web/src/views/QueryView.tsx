@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Card,
   Space,
@@ -25,7 +25,9 @@ import {
   DeleteOutlined,
   PlusOutlined
 } from '@ant-design/icons';
-import Editor from '@monaco-editor/react';
+import CodeMirror from '@uiw/react-codemirror';
+import { sql as sqlLang } from '@codemirror/lang-sql';
+import { oneDark } from '@codemirror/theme-one-dark';
 import { api, streamExport } from '../api';
 import { QueryResult, QueryHistoryItem, CustomSnippet, QueryMetaColumn } from '../types';
 
@@ -94,7 +96,6 @@ export const QueryView: React.FC<QueryViewProps> = ({
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyList, setHistoryList] = useState<QueryHistoryItem[]>([]);
   const [customSnippets, setCustomSnippets] = useState<CustomSnippet[]>([]);
-  const editorRef = useRef<any>(null);
 
   // Load History & Custom Snippets
   useEffect(() => {
@@ -362,30 +363,19 @@ export const QueryView: React.FC<QueryViewProps> = ({
         bodyStyle={{ padding: 0, height: '36vh', minHeight: 180 }}
         style={{ overflow: 'hidden' }}
       >
-        <Editor
-          height="100%"
-          language="sql"
-          theme={themeMode === 'dark' ? 'vs-dark' : 'light'}
+        <CodeMirror
           value={sql}
-          onChange={(val) => setSql(val || '')}
-          onMount={(editor) => {
-            editorRef.current = editor;
-            editor.addCommand(
-              // Monaco KeyMod.CtrlCmd | KeyCode.Enter
-              2048 | 3,
-              () => handleRunQuery()
-            );
+          height="100%"
+          theme={themeMode === 'dark' ? oneDark : 'light'}
+          extensions={[sqlLang()]}
+          onChange={(val) => setSql(val)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+              e.preventDefault();
+              handleRunQuery();
+            }
           }}
-          options={{
-            minimap: { enabled: false },
-            fontSize: 13,
-            fontFamily: "'JetBrains Mono', monospace",
-            lineNumbers: 'on',
-            scrollBeyondLastLine: false,
-            wordWrap: 'on',
-            automaticLayout: true,
-            tabSize: 4
-          }}
+          style={{ height: '100%', fontSize: 13 }}
         />
       </Card>
 

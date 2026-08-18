@@ -1,3 +1,5 @@
+@import 'antd/dist/reset.css';
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -35,4 +37,15 @@ body {
   display: flex !important;
   flex-direction: column !important;
   height: 100% !important;
+}
+
+/* CodeMirror customization */
+.cm-editor {
+  height: 100% !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 13px !important;
+}
+
+.cm-scroller {
+  font-family: 'JetBrains Mono', monospace !important;
 }
