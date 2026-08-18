@@ -179,3 +179,103 @@ func TestServiceResetsStalePendingWindow(t *testing.T) {
 		t.Fatalf("pending window was not restarted: %#v", updated)
 	}
 }
+
+func TestFormatPayloadChannels(t *testing.T) {
+	payload := Payload{
+		Version:  "1",
+		Status:   "firing",
+		Receiver: "test-receiver",
+		GroupLabels: map[string]string{
+			"alertname": "HighLatency",
+			"cluster":   "prod",
+		},
+		Alerts: []PayloadAlert{{
+			Status: "firing",
+			Labels: map[string]string{
+				"alertname": "HighLatency",
+				"cluster":   "prod",
+			},
+			Annotations: map[string]string{
+				"value": "99.5",
+			},
+			StartsAt: time.Now().UTC(),
+		}},
+	}
+	for _, ch := range []string{"generic", "wecom", "feishu", "dingtalk", "slack"} {
+		formatted, err := FormatPayload(ch, payload)
+		if err != nil {
+			t.Fatalf("FormatPayload(%q) failed: %v", ch, err)
+		}
+		if len(formatted) == 0 {
+			t.Fatalf("FormatPayload(%q) produced empty output", ch)
+		}
+	}
+}
+
+func TestTestWebhook(t *testing.T) {
+	repo := openTestRepository(t)
+	codec, _ := NewSecretCodec(make([]byte, 32))
+	target, _ := codec.Encrypt("https://example.test/webhook")
+	webhook, err := repo.CreateWebhook(context.Background(), WebhookInput{Name: "test-hook", ChannelType: "wecom", URLHint: "https://example.test/webhook", TargetEncrypted: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeSender{}
+	service := NewService(&fakeExecutor{}, sender, codec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer service.Close()
+	service.Configure(repo, 300)
+
+	result, err := service.TestWebhook(context.Background(), webhook.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusCode != 204 {
+		t.Fatalf("result status = %d", result.StatusCode)
+	}
+	deliveries, err := repo.Deliveries(context.Background(), 10)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("deliveries = %#v, %v", deliveries, err)
+	}
+}
+
+func TestRepeatIntervalAndSilencing(t *testing.T) {
+	repo := openTestRepository(t)
+	codec, _ := NewSecretCodec(make([]byte, 32))
+	target, _ := codec.Encrypt("https://example.test/hook")
+	webhook, _ := repo.CreateWebhook(context.Background(), WebhookInput{Name: "hook", TargetEncrypted: target})
+	rule, _ := repo.CreateRule(context.Background(), RuleInput{Name: "silenced", Cluster: "default", SQL: "SELECT 1", IntervalSeconds: 10, ForSeconds: 0, RepeatIntervalSeconds: 60, WebhookID: &webhook.ID, Enabled: true})
+
+	executor := &fakeExecutor{active: true, value: "1"}
+	sender := &fakeSender{}
+	service := NewService(executor, sender, codec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer service.Close()
+
+	// Initial fire: should deliver once
+	service.evaluate(repo, rule)
+	sender.mu.Lock()
+	if len(sender.payloads) != 1 {
+		t.Fatalf("initial payloads = %d; want 1", len(sender.payloads))
+	}
+	sender.mu.Unlock()
+
+	firingRule, _ := repo.Rule(context.Background(), rule.ID)
+	// Immediate next evaluation (before repeat interval): should NOT deliver again
+	service.evaluate(repo, firingRule)
+	sender.mu.Lock()
+	if len(sender.payloads) != 1 {
+		t.Fatalf("immediate payloads = %d; want 1", len(sender.payloads))
+	}
+	sender.mu.Unlock()
+
+	// Set silence window to future
+	silenceUntil := time.Now().Add(10 * time.Minute)
+	firingRule.SilencedUntil = &silenceUntil
+	_ = repo.UpdateRuleState(context.Background(), firingRule.ID, RuleState{State: StateFiring, LastEvaluatedAt: time.Now().UTC(), LastValue: "1"})
+
+	service.evaluate(repo, firingRule)
+	sender.mu.Lock()
+	if len(sender.payloads) != 1 {
+		t.Fatalf("silenced payloads = %d; want 1", len(sender.payloads))
+	}
+	sender.mu.Unlock()
+}

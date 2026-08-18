@@ -166,7 +166,7 @@ func (s *Service) evaluate(repo Repository, rule Rule) {
 	result, err := executor.Evaluate(ctx, rule.Cluster, rule.SQL)
 	cancel()
 	now := time.Now().UTC()
-	state := RuleState{State: rule.State, ActiveSince: rule.ActiveSince, LastEvaluatedAt: now, LastValue: result.Value}
+	state := RuleState{State: rule.State, ActiveSince: rule.ActiveSince, LastEvaluatedAt: now, LastDeliveredAt: rule.LastDeliveredAt, LastValue: result.Value}
 	if state.State == StatePending && (rule.LastEvaluatedAt == nil || now.Sub(*rule.LastEvaluatedAt) > 2*time.Duration(rule.IntervalSeconds)*time.Second) {
 		state.State, state.ActiveSince = StateInactive, nil
 	}
@@ -191,12 +191,17 @@ func (s *Service) evaluate(repo Repository, rule Rule) {
 		}
 		if state.State == StatePending && now.Sub(*state.ActiveSince) >= time.Duration(rule.ForSeconds)*time.Second {
 			state.State = StateFiring
-			s.emit(repo, rule, state, "firing", nil)
+			s.emit(repo, rule, &state, "firing", nil)
+		} else if state.State == StateFiring && rule.RepeatIntervalSeconds > 0 {
+			if state.LastDeliveredAt == nil || now.Sub(*state.LastDeliveredAt) >= time.Duration(rule.RepeatIntervalSeconds)*time.Second {
+				s.emit(repo, rule, &state, "firing", nil)
+			}
 		}
 	} else {
 		if state.State == StateFiring {
 			ended := now
-			s.emit(repo, rule, state, "resolved", &ended)
+			s.emit(repo, rule, &state, "resolved", &ended)
+			state.LastDeliveredAt = nil
 		}
 		state.State, state.ActiveSince = StateInactive, nil
 	}
@@ -205,7 +210,7 @@ func (s *Service) evaluate(repo Repository, rule Rule) {
 	}
 }
 
-func (s *Service) emit(repo Repository, rule Rule, state RuleState, status string, ended *time.Time) {
+func (s *Service) emit(repo Repository, rule Rule, state *RuleState, status string, ended *time.Time) {
 	started := state.LastEvaluatedAt
 	if state.ActiveSince != nil {
 		started = *state.ActiveSince
@@ -215,12 +220,18 @@ func (s *Service) emit(repo Repository, rule Rule, state RuleState, status strin
 		s.log.Error("store alert event", "rule", rule.ID, "error", err)
 		return
 	}
+	now := time.Now().UTC()
+	if rule.SilencedUntil != nil && now.Before(*rule.SilencedUntil) {
+		s.log.Info("alert is silenced; skipping delivery", "rule", rule.ID, "silenced_until", rule.SilencedUntil)
+		return
+	}
 	if rule.WebhookID != nil {
 		webhook, fetchErr := repo.Webhook(context.Background(), *rule.WebhookID)
 		if fetchErr != nil {
 			s.log.Error("load alert webhook", "rule", rule.ID, "error", fetchErr)
 		} else {
 			s.deliver(repo, rule, event, webhook)
+			state.LastDeliveredAt = &now
 		}
 	}
 	s.mu.RLock()
@@ -247,7 +258,7 @@ func (s *Service) deliver(repo Repository, rule Rule, event Event, webhook Webho
 	}
 	labels := map[string]string{"alertname": rule.Name, "rule_id": strconv.FormatInt(rule.ID, 10), "cluster": rule.Cluster}
 	payload := Payload{Version: "1", GroupKey: fmt.Sprintf("rule:%d", rule.ID), Status: event.Status, Receiver: webhook.Name, GroupLabels: labels, CommonLabels: labels, Alerts: []PayloadAlert{{Status: event.Status, Labels: labels, Annotations: map[string]string{"summary": rule.Name, "sql": rule.SQL, "value": event.Value}, StartsAt: event.StartedAt, EndsAt: event.EndedAt}}}
-	result := s.sender.Send(context.Background(), WebhookTarget{Name: webhook.Name, URL: targetURL, Authorization: authorization}, payload)
+	result := s.sender.Send(context.Background(), WebhookTarget{Name: webhook.Name, URL: targetURL, Authorization: authorization, ChannelType: webhook.ChannelType}, payload)
 	s.storeDelivery(repo, rule, event, webhook, result)
 }
 
@@ -263,10 +274,53 @@ func (s *Service) storeDelivery(repo Repository, rule Rule, event Event, webhook
 			errorText = "webhook request failed"
 		}
 	}
-	_, err := repo.CreateDelivery(context.Background(), Delivery{EventID: event.ID, RuleID: rule.ID, RuleName: rule.Name, WebhookID: webhook.ID, WebhookName: webhook.Name, Status: status, HTTPStatus: result.StatusCode, Error: errorText, CreatedAt: now, SentAt: &now})
+	_, err := repo.CreateDelivery(context.Background(), Delivery{EventID: event.ID, RuleID: rule.ID, RuleName: rule.Name, WebhookID: webhook.ID, WebhookName: webhook.Name, Status: status, HTTPStatus: result.StatusCode, Error: errorText, ResponseBody: result.Body, CreatedAt: now, SentAt: &now})
 	if err != nil {
 		s.log.Error("store webhook delivery", "rule", rule.ID, "error", err)
 	}
+}
+
+func (s *Service) TestWebhook(ctx context.Context, id int64) (SendResult, error) {
+	repo, _, err := s.repository()
+	if err != nil {
+		return SendResult{}, err
+	}
+	webhook, err := repo.Webhook(ctx, id)
+	if err != nil {
+		return SendResult{}, err
+	}
+	targetURL, err := s.codec.Decrypt(webhook.TargetEncrypted)
+	if err != nil {
+		return SendResult{}, fmt.Errorf("decrypt webhook target: %w", err)
+	}
+	authorization := ""
+	if webhook.AuthEncrypted != "" {
+		authorization, err = s.codec.Decrypt(webhook.AuthEncrypted)
+		if err != nil {
+			return SendResult{}, fmt.Errorf("decrypt webhook authorization: %w", err)
+		}
+	}
+	now := time.Now().UTC()
+	labels := map[string]string{"alertname": "测试报警规则", "rule_id": "0", "cluster": "test"}
+	payload := Payload{
+		Version:      "1",
+		GroupKey:     "rule:0",
+		Status:       "firing",
+		Receiver:     webhook.Name,
+		GroupLabels:  labels,
+		CommonLabels: labels,
+		Alerts: []PayloadAlert{{
+			Status:      "firing",
+			Labels:      labels,
+			Annotations: map[string]string{"summary": "这是一条来自 ClickHouse Console 的 Webhook 测试消息", "sql": "SELECT 1", "value": "1"},
+			StartsAt:    now,
+		}},
+	}
+	result := s.sender.Send(ctx, WebhookTarget{Name: webhook.Name, URL: targetURL, Authorization: authorization, ChannelType: webhook.ChannelType}, payload)
+	dummyRule := Rule{ID: 0, Name: "Webhook 测试"}
+	dummyEvent := Event{ID: 0, Status: "firing", Value: "1", StartedAt: now}
+	s.storeDelivery(repo, dummyRule, dummyEvent, webhook, result)
+	return result, nil
 }
 
 func (s *Service) Rules(ctx context.Context) ([]Rule, error) {
@@ -314,8 +368,8 @@ func (s *Service) Webhooks(ctx context.Context) ([]Webhook, error) {
 	}
 	return repo.Webhooks(ctx)
 }
-func (s *Service) CreateWebhook(ctx context.Context, name, target, authorization string) (Webhook, error) {
-	input, err := s.webhookInput(name, target, authorization)
+func (s *Service) CreateWebhook(ctx context.Context, name, channelType, target, authorization string) (Webhook, error) {
+	input, err := s.webhookInput(name, channelType, target, authorization)
 	if err != nil {
 		return Webhook{}, err
 	}
@@ -325,7 +379,7 @@ func (s *Service) CreateWebhook(ctx context.Context, name, target, authorization
 	}
 	return repo.CreateWebhook(ctx, input)
 }
-func (s *Service) UpdateWebhook(ctx context.Context, id int64, name, target, authorization string, updateTarget bool) (Webhook, error) {
+func (s *Service) UpdateWebhook(ctx context.Context, id int64, name, channelType, target, authorization string, updateTarget bool) (Webhook, error) {
 	if !updateTarget {
 		if strings.TrimSpace(name) == "" {
 			return Webhook{}, errors.New("webhook name is required")
@@ -334,9 +388,9 @@ func (s *Service) UpdateWebhook(ctx context.Context, id int64, name, target, aut
 		if err != nil {
 			return Webhook{}, err
 		}
-		return repo.UpdateWebhook(ctx, id, WebhookInput{Name: strings.TrimSpace(name)}, false)
+		return repo.UpdateWebhook(ctx, id, WebhookInput{Name: strings.TrimSpace(name), ChannelType: strings.ToLower(strings.TrimSpace(channelType))}, false)
 	}
-	input, err := s.webhookInput(name, target, authorization)
+	input, err := s.webhookInput(name, channelType, target, authorization)
 	if err != nil {
 		return Webhook{}, err
 	}
@@ -368,10 +422,17 @@ func (s *Service) Deliveries(ctx context.Context, limit int) ([]Delivery, error)
 	return repo.Deliveries(ctx, normalizeLimit(limit, max))
 }
 
-func (s *Service) webhookInput(name, target, authorization string) (WebhookInput, error) {
+func (s *Service) webhookInput(name, channelType, target, authorization string) (WebhookInput, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 200 {
 		return WebhookInput{}, errors.New("webhook name must be 1-200 characters")
+	}
+	channelType = strings.ToLower(strings.TrimSpace(channelType))
+	if channelType == "" {
+		channelType = "generic"
+	}
+	if channelType != "generic" && channelType != "wecom" && channelType != "feishu" && channelType != "dingtalk" && channelType != "slack" {
+		return WebhookInput{}, fmt.Errorf("unsupported channel type %q", channelType)
 	}
 	parsed, err := url.Parse(strings.TrimSpace(target))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
@@ -392,7 +453,7 @@ func (s *Service) webhookInput(name, target, authorization string) (WebhookInput
 		}
 	}
 	hint := parsed.Scheme + "://" + parsed.Host
-	return WebhookInput{Name: name, URLHint: hint, TargetEncrypted: encrypted, AuthEncrypted: authEncrypted, AuthConfigured: authorization != ""}, nil
+	return WebhookInput{Name: name, ChannelType: channelType, URLHint: hint, TargetEncrypted: encrypted, AuthEncrypted: authEncrypted, AuthConfigured: authorization != ""}, nil
 }
 func validateRule(input RuleInput) error {
 	if strings.TrimSpace(input.Name) == "" || len(input.Name) > 200 {
@@ -409,6 +470,9 @@ func validateRule(input RuleInput) error {
 	}
 	if input.ForSeconds < 0 || input.ForSeconds > 2592000 {
 		return errors.New("for duration must be between 0 and 30 days")
+	}
+	if input.RepeatIntervalSeconds < 0 || input.RepeatIntervalSeconds > 2592000 {
+		return errors.New("repeat interval must be between 0 and 30 days")
 	}
 	return nil
 }

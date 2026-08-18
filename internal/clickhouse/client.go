@@ -72,6 +72,17 @@ type Monitoring struct {
 	Parts       []map[string]any `json:"parts"`
 	Disks       []map[string]any `json:"disks"`
 }
+type Process struct {
+	QueryID         string  `json:"query_id"`
+	User            string  `json:"user"`
+	Address         string  `json:"address"`
+	Elapsed         float64 `json:"elapsed"`
+	ReadRows        uint64  `json:"read_rows"`
+	ReadBytes       uint64  `json:"read_bytes"`
+	TotalRowsApprox uint64  `json:"total_rows_approx"`
+	MemoryUsage     int64   `json:"memory_usage"`
+	Query           string  `json:"query"`
+}
 
 var (
 	firstWord     = regexp.MustCompile(`(?i)^([a-z]+)`)
@@ -540,4 +551,156 @@ func (c *Client) Monitor(ctx context.Context) (Monitoring, error) {
 		GeneratedAt: time.Now().UTC(), Metrics: collected["metrics"], Async: collected["async"],
 		Events: collected["events"], Parts: collected["parts"], Disks: collected["disks"],
 	}, nil
+}
+
+func (c *Client) Processes(ctx context.Context) ([]Process, error) {
+	query := "SELECT query_id, user, address, elapsed, read_rows, read_bytes, total_rows_approx, memory_usage, query FROM system.processes WHERE query_id != currentQueryID() AND query NOT LIKE '%system.processes%' AND query NOT LIKE 'KILL QUERY%' ORDER BY elapsed DESC"
+	res, err := c.Execute(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("read system.processes: %w", err)
+	}
+	processes := make([]Process, 0, len(res.Data))
+	for _, row := range res.Data {
+		var p Process
+		if v, ok := row["query_id"].(string); ok {
+			p.QueryID = v
+		}
+		if v, ok := row["user"].(string); ok {
+			p.User = v
+		}
+		if v, ok := row["address"].(string); ok {
+			p.Address = v
+		}
+		if v, ok := row["query"].(string); ok {
+			p.Query = v
+		}
+		p.Elapsed = toFloat64(row["elapsed"])
+		p.ReadRows = toUint64(row["read_rows"])
+		p.ReadBytes = toUint64(row["read_bytes"])
+		p.TotalRowsApprox = toUint64(row["total_rows_approx"])
+		p.MemoryUsage = toInt64(row["memory_usage"])
+		processes = append(processes, p)
+	}
+	return processes, nil
+}
+
+func (c *Client) KillQuery(ctx context.Context, queryID string) error {
+	queryID = strings.TrimSpace(queryID)
+	if queryID == "" {
+		return errors.New("query_id is required")
+	}
+	if len(queryID) > 512 || strings.ContainsAny(queryID, "\r\n\x00") {
+		return errors.New("invalid query_id")
+	}
+	killSQL := "KILL QUERY WHERE query_id = " + quoteString(queryID) + " SYNC"
+	_, err := c.Execute(ctx, killSQL)
+	if err != nil {
+		return fmt.Errorf("kill query %q: %w", queryID, err)
+	}
+	return nil
+}
+
+var validStreamFormat = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+func (c *Client) StreamQuery(ctx context.Context, sql string, format string, w io.Writer) error {
+	kind, err := Classify(sql)
+	if err != nil {
+		return err
+	}
+	if kind != "query" {
+		return errors.New("only read queries can be streamed")
+	}
+	format = strings.TrimSpace(format)
+	if format == "" {
+		format = "CSVWithNames"
+	}
+	if !validStreamFormat.MatchString(format) {
+		return fmt.Errorf("invalid format %q", format)
+	}
+	q := strings.TrimSpace(sql)
+	if !regexp.MustCompile(`(?i)\bFORMAT\s+\w+\s*;?$`).MatchString(q) {
+		q = strings.TrimSuffix(q, ";") + " FORMAT " + format
+	}
+	u, err := url.Parse(c.endpoint)
+	if err != nil {
+		return err
+	}
+	params := u.Query()
+	params.Set("database", c.database)
+	u.RawQuery = params.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewBufferString(q))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if c.user != "" {
+		req.SetBasicAuth(c.user, c.password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("ClickHouse: %s", strings.TrimSpace(string(body)))
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
+func toFloat64(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
+	default:
+		return 0
+	}
+}
+
+func toUint64(v any) uint64 {
+	switch n := v.(type) {
+	case float64:
+		return uint64(n)
+	case int:
+		return uint64(n)
+	case int64:
+		return uint64(n)
+	case uint64:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return uint64(i)
+	default:
+		return 0
+	}
+}
+
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case uint64:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	default:
+		return 0
+	}
 }

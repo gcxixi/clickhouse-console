@@ -3,7 +3,14 @@ const $$ = selector => document.querySelectorAll(selector);
 const apiRoot = new URL('api/', document.baseURI);
 const defaultSQLPlaceholder = '输入 SQL，或选择库表生成查询建议';
 const monitorCacheTTL = 60 * 60 * 1000;
-let state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: []};
+let state = {
+  csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '',
+  activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '',
+  selectedTable: '', queryResult: null, resultColumnVisibility: [],
+  monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: [],
+  processes: [], processesInterval: null,
+  sortColumn: null, sortAsc: true
+};
 
 const lucideIcons = {
   activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
@@ -15,6 +22,7 @@ const lucideIcons = {
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>',
   'file-down': '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>',
+  'download-cloud': '<path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/><path d="M12 12v9"/><path d="m8 17 4 4 4-4"/>',
   'log-out': '<path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>',
   network: '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
   pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
@@ -30,6 +38,10 @@ const lucideIcons = {
   'trash-2': '<path d="M10 11v6M14 11v6M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3.13a4 4 0 0 1 0 7.74M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/>',
   webhook: '<path d="M18 16.98h-5.99c-1.1 0-1.95-.94-2.48-1.9L7 10.5"/><path d="m6 14-3-1.5L4.5 10"/><path d="M6 8.3a4 4 0 1 1 7.5-2.3l-3 5.2"/><circle cx="6" cy="18" r="3"/><path d="M14.3 18a4 4 0 1 0 2.2-7.5L11 10.4"/>',
+  cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/>',
+  bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
+  'sun-moon': '<path d="M12 8a2.83 2.83 0 0 0 4 4 4 4 0 1 1-4-4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   x: '<path d="M18 6 6 18M6 6l12 12"/>'
 };
 
@@ -40,6 +52,25 @@ function icon(name, size = 16) {
 function hydrateIcons(root = document) {
   root.querySelectorAll('[data-lucide]').forEach(element => { element.innerHTML = icon(element.dataset.lucide, Number(element.dataset.iconSize) || 16); });
 }
+
+// Theme system
+function getSavedTheme() { return localStorage.getItem('clickhouse_console_theme') || 'auto'; }
+function applyTheme(theme) {
+  document.body.classList.remove('theme-dark', 'theme-light');
+  if (theme === 'dark') document.body.classList.add('theme-dark');
+  else if (theme === 'light') document.body.classList.add('theme-light');
+  localStorage.setItem('clickhouse_console_theme', theme);
+  const toggle = $('#themeToggle');
+  if (toggle) toggle.title = `切换主题 (当前: ${theme === 'dark' ? '深色' : theme === 'light' ? '浅色' : '跟随系统'})`;
+}
+function cycleTheme() {
+  const current = getSavedTheme();
+  const next = current === 'auto' ? 'dark' : current === 'dark' ? 'light' : 'auto';
+  applyTheme(next);
+  toast(`已切换为${next === 'dark' ? '深色' : next === 'light' ? '浅色' : '跟随系统'}主题`);
+}
+$('#themeToggle').onclick = cycleTheme;
+applyTheme(getSavedTheme());
 
 const sqlKeywords = new Set('ADD AFTER ALIAS ALL ALTER AND ANTI ANY ARRAY AS ASC ASOF ATTACH BETWEEN BY CASE CAST CHECK CLEAR CLUSTER CODEC COLLATE COLUMN COMMENT CONSTRAINT CREATE CROSS CUBE DATABASE DATABASES DEFAULT DELETE DESC DESCRIBE DETACH DICTIONARY DISTINCT DISTRIBUTED DROP ELSE END ENGINE EXISTS EXPLAIN FINAL FIRST FORMAT FROM FULL FUNCTION GLOBAL GRANT GROUP HAVING IF IN INDEX INNER INSERT INTERVAL INTO IS JOIN KEY KILL LAST LEFT LIKE LIMIT LIVE LOCAL MATERIALIZED MODIFY MOVE MUTATION NOT NULL NULLS ON OPTIMIZE OR ORDER OUTER PARTITION PREWHERE PRIMARY PROJECTION RENAME REPLACE REVOKE RIGHT SAMPLE SELECT SETTINGS SHOW SYNC SYSTEM TABLE TABLES TEMPORARY THEN TIES TO TOP TOTALS TRUNCATE TTL UNION UPDATE USE USING VALUES VIEW WHEN WHERE WINDOW WITH'.split(' '));
 const sqlTypes = new Set('AGGREGATEFUNCTION ARRAY BOOL BOOLEAN DATE DATE32 DATETIME DATETIME64 DECIMAL ENUM ENUM8 ENUM16 FIXEDSTRING FLOAT32 FLOAT64 INT8 INT16 INT32 INT64 INT128 INT256 IPV4 IPV6 JSON LOWCARDINALITY MAP NESTED NOTHING NULLABLE OBJECT POINT POLYGON RING SIMPLEAGGREGATEFUNCTION STRING TUPLE UINT8 UINT16 UINT32 UINT64 UINT128 UINT256 UUID VARIANT'.split(' '));
@@ -130,7 +161,7 @@ $('#loginForm').addEventListener('submit', async event => {
 $('#logout').onclick = async () => {
   try { await api('/api/logout', {method: 'POST'}); }
   finally {
-    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: []};
+    state = {csrf: '', user: null, clusters: [], managedClusters: [], activeCluster: '', activeView: 'query', pendingCluster: '', suggestedSQL: '', selectedDatabase: '', selectedTable: '', queryResult: null, resultColumnVisibility: [], monitorLoadingCluster: '', alertingConfig: null, alertRules: [], alertWebhooks: [], processes: [], processesInterval: null};
     showLogin();
   }
 };
@@ -142,6 +173,7 @@ function activateView(view) {
   $$('.view').forEach(element => element.classList.add('hidden'));
   $(`#${view}View`).classList.remove('hidden');
   if (view === 'schema') loadDatabases();
+  if (view === 'processes') loadProcesses();
   if (view === 'monitor') loadMonitor();
   if (view === 'alerting') loadAlerting();
   if (view === 'clusters') loadManagedClusters();
@@ -153,15 +185,17 @@ $$('nav button').forEach(button => button.onclick = () => activateView(button.da
 
 async function checkHealth() {
   const cluster = state.activeCluster;
+  const dot = $('#healthDot');
+  const label = $('#currentClusterLabel');
   try {
     await api('/api/health');
     if (cluster !== state.activeCluster) return;
-    $('#health').className = 'health ok';
-    $('#health span').textContent = `${cluster} · 已连接`;
+    if (dot) { dot.className = 'status-dot ok'; dot.title = `${cluster} · 已连接`; }
+    if (label) label.textContent = cluster;
   } catch {
     if (cluster !== state.activeCluster) return;
-    $('#health').className = 'health bad';
-    $('#health span').textContent = `${cluster} · 连接失败`;
+    if (dot) { dot.className = 'status-dot bad'; dot.title = `${cluster} · 连接失败`; }
+    if (label) label.textContent = cluster;
   }
 }
 
@@ -170,6 +204,8 @@ function renderClusterSelector() {
   select.replaceChildren(...state.clusters.map(cluster => new Option(cluster.alias, cluster.alias)));
   select.value = state.activeCluster;
   select.disabled = state.clusters.length < 2;
+  const label = $('#currentClusterLabel');
+  if (label) label.textContent = state.activeCluster || '选择集群';
 }
 
 $('#clusterSelect').addEventListener('change', event => {
@@ -211,6 +247,7 @@ $('#clusterForm').onsubmit = async event => {
     checkHealth();
     loadEditorDatabases().catch(error => toast(error.message));
     if (state.activeView === 'schema') loadDatabases();
+    if (state.activeView === 'processes') loadProcesses();
     if (state.activeView === 'monitor') loadMonitor();
     toast(`已切换到集群 ${alias}`);
   } catch (error) { toast(error.message); }
@@ -299,6 +336,8 @@ async function stageTableQuery(database, table) {
 function resetQueryResult() {
   state.queryResult = null;
   state.resultColumnVisibility = [];
+  state.sortColumn = null;
+  state.sortAsc = true;
   $('#queryStatus').className = 'status hidden';
   $('#queryStatus').textContent = '';
   $('#resultMeta').textContent = '等待执行';
@@ -405,6 +444,7 @@ async function runQuery() {
   $('#queryStatus').className = 'status hidden';
   try {
     const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql})});
+    saveQueryHistory(sql, result.elapsed_ms, result.rows || 0);
     $('#queryStatus').className = 'status ok';
     $('#queryStatus').textContent = result.kind === 'batch' ? `${result.statement_count} 条语句执行成功 · ${result.elapsed_ms} ms` : `执行成功 · ${result.elapsed_ms} ms`;
     $('#resultMeta').textContent = result.kind === 'query' ? `${result.rows || 0} 行 · ${result.elapsed_ms} ms` : result.kind === 'batch' ? `${result.statement_count} 条全部成功${result.meta?.length ? ` · 最后一条返回 ${result.rows || 0} 行` : ''}` : `${result.kind.toUpperCase()} 执行成功`;
@@ -421,6 +461,8 @@ async function runQuery() {
 
 function renderResult(result) {
   state.queryResult = result;
+  state.sortColumn = null;
+  state.sortAsc = true;
   if (!result.meta?.length) {
     state.resultColumnVisibility = [];
     $('#resultColumns').className = 'result-column-controls hidden';
@@ -448,23 +490,33 @@ function readResultColumnVisibility(meta) {
     const saved = JSON.parse(localStorage.getItem(resultColumnPreferenceKey(meta)) || 'null');
     if (Array.isArray(saved) && saved.length === meta.length && saved.every(item => typeof item === 'boolean')) return saved;
   } catch {}
-  return meta.map(() => true);
+  return new Array(meta.length).fill(true);
 }
 
-function writeResultColumnVisibility() {
-  if (!state.queryResult?.meta?.length) return;
-  try { localStorage.setItem(resultColumnPreferenceKey(state.queryResult.meta), JSON.stringify(state.resultColumnVisibility)); } catch {}
+function writeResultColumnVisibility(meta, visibility) {
+  try { localStorage.setItem(resultColumnPreferenceKey(meta), JSON.stringify(visibility)); } catch {}
 }
 
 function renderResultColumnControls(meta) {
   const controls = $('#resultColumns');
   controls.className = 'result-column-controls';
-  controls.innerHTML = `<span class="result-column-label">显示字段</span><div class="result-column-options">${meta.map((column, index) => `<label title="${esc(column.type)}"><input type="checkbox" data-column-index="${index}" ${state.resultColumnVisibility[index] ? 'checked' : ''}><span>${esc(column.name)}</span></label>`).join('')}</div>`;
-  controls.querySelectorAll('input').forEach(input => input.addEventListener('change', event => {
-    state.resultColumnVisibility[Number(event.currentTarget.dataset.columnIndex)] = event.currentTarget.checked;
-    writeResultColumnVisibility();
-    renderResultTable();
-  }));
+  controls.innerHTML = `
+    <span class="result-column-label">显示字段</span>
+    <div class="result-column-options">
+      ${meta.map((column, index) => `
+        <label title="${esc(column.name)} (${esc(column.type)})">
+          <input type="checkbox" data-column-index="${index}" ${state.resultColumnVisibility[index] ? 'checked' : ''}>
+          <span>${esc(column.name)}</span>
+        </label>`).join('')}
+    </div>`;
+  controls.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+    checkbox.onchange = () => {
+      const index = Number(checkbox.dataset.columnIndex);
+      state.resultColumnVisibility[index] = checkbox.checked;
+      writeResultColumnVisibility(meta, state.resultColumnVisibility);
+      renderResultTable();
+    };
+  });
 }
 
 function renderResultTable() {
@@ -476,8 +528,39 @@ function renderResultTable() {
     $('#result').textContent = '请至少选择一个字段以显示查询结果';
     return;
   }
+  let rows = [...(result.data || [])];
+  if (state.sortColumn) {
+    const col = state.sortColumn;
+    const asc = state.sortAsc;
+    rows.sort((a, b) => {
+      const va = a[col], vb = b[col];
+      if (va === vb) return 0;
+      if (va === null || va === undefined) return 1;
+      if (vb === null || vb === undefined) return -1;
+      const na = Number(va), nb = Number(vb);
+      if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na;
+      return asc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+    });
+  }
   $('#result').className = 'table-wrap';
-  $('#result').innerHTML = `<table><thead><tr>${visibleColumns.map(({column}) => `<th title="${esc(column.type)}">${esc(column.name)}</th>`).join('')}</tr></thead><tbody>${(result.data || []).map(row => `<tr>${visibleColumns.map(({column}) => `<td class="code result-cell">${esc(value(row[column.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  $('#result').innerHTML = `<table><thead><tr>${visibleColumns.map(({column}) => {
+    const isSorted = state.sortColumn === column.name;
+    const sortClass = isSorted ? (state.sortAsc ? 'sorted-asc' : 'sorted-desc') : '';
+    const arrow = isSorted ? (state.sortAsc ? ' ▲' : ' ▼') : ' ⇅';
+    return `<th class="sortable ${sortClass}" data-col="${esc(column.name)}" title="点击按 ${esc(column.name)} 排序">${esc(column.name)}<span class="sort-icon">${arrow}</span></th>`;
+  }).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${visibleColumns.map(({column}) => `<td class="code result-cell copyable" data-val="${esc(value(row[column.name]))}">${esc(value(row[column.name]))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  
+  $$('#result th.sortable').forEach(th => {
+    th.onclick = () => {
+      const col = th.dataset.col;
+      if (state.sortColumn === col) state.sortAsc = !state.sortAsc;
+      else { state.sortColumn = col; state.sortAsc = true; }
+      renderResultTable();
+    };
+  });
+  $$('#result td.copyable').forEach(td => {
+    td.onclick = () => copyText(td.dataset.val, '单元格内容已复制');
+  });
   requestAnimationFrame(updateResultOverflowTooltips);
 }
 
@@ -487,13 +570,6 @@ function updateResultOverflowTooltips() {
     else cell.removeAttribute('title');
   });
 }
-
-$('#result').addEventListener('mouseover', event => {
-  const cell = event.target.closest('td.result-cell');
-  if (!cell) return;
-  if (cell.scrollWidth > cell.clientWidth) cell.title = cell.textContent;
-  else cell.removeAttribute('title');
-});
 
 function exportQueryResult() {
   const result = state.queryResult;
@@ -515,6 +591,252 @@ function exportQueryResult() {
 }
 
 $('#exportResult').onclick = exportQueryResult;
+
+// Stream Export Directly from ClickHouse Server
+async function streamExportQueryResult() {
+  const sql = $('#sql').value.trim();
+  if (!sql) { toast('请先在编辑器输入要导出的 SQL 查询'); return; }
+  const format = $('#resultExportFormat').value || 'CSVWithNames';
+  const btn = $('#streamExportResult');
+  btn.disabled = true;
+  btn.innerHTML = `${icon('download-cloud', 13)}<span>导出中…</span>`;
+  try {
+    const endpoint = new URL('query/stream-export', apiRoot);
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.csrf ? {'X-CSRF-Token': state.csrf} : {})
+      },
+      body: JSON.stringify({
+        sql,
+        format,
+        filename: `${ResultExport.safeName(state.activeCluster)}-export`
+      })
+    });
+    if (!response.ok) {
+      let err = `导出失败 (${response.status})`;
+      try { const errObj = await response.json(); err = errObj.error || err; } catch {}
+      throw new Error(err);
+    }
+    const blob = await response.blob();
+    const objectURL = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const cd = response.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : `export-${Date.now()}.${ResultExport.formats[format]?.extension || 'txt'}`;
+    link.href = objectURL;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectURL);
+    toast(`流式导出完成: ${filename}`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${icon('download-cloud', 13)}<span>流式导出</span>`;
+  }
+}
+$('#streamExportResult').onclick = streamExportQueryResult;
+
+// Running Queries (Processes) View & Query Killer
+async function loadProcesses() {
+  try {
+    const data = await api('/api/processes');
+    state.processes = data.processes || [];
+    renderProcesses();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function renderProcesses() {
+  const list = state.processes || [];
+  $('#processesCount').textContent = `${list.length} 个正在运行的查询`;
+  $('#processRows').innerHTML = list.length ? list.map(p => `<tr>
+    <td class="code" title="${esc(p.query_id)}">${esc(p.query_id)}</td>
+    <td>${esc(p.user)}</td>
+    <td>${Number(p.elapsed).toFixed(1)}s</td>
+    <td>${formatCount(p.read_rows)}</td>
+    <td>${formatBytes(p.read_bytes)}</td>
+    <td>${formatBytes(p.memory_usage)}</td>
+    <td class="code" title="${esc(p.query)}">${esc(p.query)}</td>
+    <td>${state.user?.Role !== 'viewer' ? `<button class="kill-btn" data-query-id="${esc(p.query_id)}">终止 (Kill)</button>` : ''}</td>
+  </tr>`).join('') : '<tr><td colspan="8" class="empty">当前没有正在运行的查询</td></tr>';
+  $$('.kill-btn').forEach(btn => btn.onclick = () => killQuery(btn.dataset.queryId, btn));
+}
+
+async function killQuery(queryId, btn) {
+  if (!confirm(`确认终止运行中的查询 ${queryId} 吗？`)) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '终止中…';
+  }
+  try {
+    await api('/api/processes/kill', {method: 'POST', body: JSON.stringify({query_id: queryId})});
+    toast(`查询 ${queryId} 已终止`);
+    setTimeout(loadProcesses, 300);
+  } catch (error) {
+    toast(error.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '终止 (Kill)';
+    }
+  }
+}
+
+$('#refreshProcesses').onclick = loadProcesses;
+$('#autoRefreshProcesses').onchange = event => {
+  if (event.target.checked) {
+    if (!state.processesInterval) {
+      state.processesInterval = setInterval(() => {
+        if (state.activeView === 'processes') loadProcesses();
+      }, 3000);
+    }
+  } else {
+    if (state.processesInterval) {
+      clearInterval(state.processesInterval);
+      state.processesInterval = null;
+    }
+  }
+};
+
+// Built-in Snippets and Query History
+const builtInSnippets = [
+  {
+    title: '慢查询 Top 10（近 1 小时）',
+    desc: '从 system.query_log 获取执行时间最长的完成查询',
+    sql: `SELECT\n    query_id,\n    user,\n    query_duration_ms / 1000 AS duration_s,\n    read_rows,\n    formatReadableSize(read_bytes) AS read_size,\n    formatReadableSize(memory_usage) AS memory,\n    query\nFROM system.query_log\nWHERE type = 'QueryFinish' AND event_time >= now() - INTERVAL 1 HOUR\nORDER BY query_duration_ms DESC\nLIMIT 10;`
+  },
+  {
+    title: '表磁盘大小与行数概览',
+    desc: '统计每个表的数据行数、分区 Part 数量和磁盘空间占用',
+    sql: `SELECT\n    database,\n    table,\n    formatReadableSize(sum(bytes_on_disk)) AS size_on_disk,\n    sum(rows) AS total_rows,\n    count() AS parts_count\nFROM system.parts\nWHERE active\nGROUP BY database, table\nORDER BY sum(bytes_on_disk) DESC\nLIMIT 20;`
+  },
+  {
+    title: '后台合并状态 (Merges)',
+    desc: '查看当前正在执行的后台 Part 合并任务进度与速度',
+    sql: `SELECT\n    database,\n    table,\n    elapsed,\n    round(progress, 2) AS progress,\n    num_parts,\n    formatReadableSize(total_size_bytes_compressed) AS total_size,\n    formatReadableSize(bytes_read_uncompressed) AS read_bytes,\n    formatReadableSize(bytes_written_uncompressed) AS written_bytes\nFROM system.merges;`
+  },
+  {
+    title: '副本同步队列与延迟 (Replicas)',
+    desc: '监控副本表的同步队列大小与只读状态',
+    sql: `SELECT\n    database,\n    table,\n    is_leader,\n    is_readonly,\n    queue_size,\n    inserts_in_queue,\n    merges_in_queue,\n    log_pointer,\n    total_replicas,\n    active_replicas\nFROM system.replicas;`
+  },
+  {
+    title: '系统错误日志统计 (System Errors)',
+    desc: '近 24 小时内发生的 ClickHouse 错误类型与发生次数',
+    sql: `SELECT\n    name,\n    value AS error_count,\n    last_error_time,\n    last_error_message\nFROM system.errors\nWHERE value > 0\nORDER BY last_error_time DESC\nLIMIT 20;`
+  }
+];
+
+function getCustomSnippets() {
+  try { return JSON.parse(localStorage.getItem('clickhouse_console_custom_snippets') || '[]'); } catch { return []; }
+}
+function saveCustomSnippets(list) {
+  try { localStorage.setItem('clickhouse_console_custom_snippets', JSON.stringify(list)); } catch {}
+}
+function getQueryHistory() {
+  try { return JSON.parse(localStorage.getItem('clickhouse_console_history') || '[]'); } catch { return []; }
+}
+function saveQueryHistory(sql, elapsed_ms, rows) {
+  if (!sql) return;
+  const list = getQueryHistory();
+  list.unshift({sql, cluster: state.activeCluster, elapsed_ms, rows, at: Date.now()});
+  if (list.length > 50) list.length = 50;
+  try { localStorage.setItem('clickhouse_console_history', JSON.stringify(list)); } catch {}
+}
+
+function renderSnippetsModal() {
+  const custom = getCustomSnippets();
+  const allSnippets = [...custom.map((s, i) => ({...s, isCustom: true, customIndex: i})), ...builtInSnippets];
+  $('#snippetsList').innerHTML = allSnippets.map(item => `
+    <div class="snippet-card">
+      <div class="snippet-card-head">
+        <strong>${esc(item.title)}</strong>
+        <div class="snippet-card-actions">
+          <button class="ghost load-snippet" data-sql="${esc(item.sql)}">${icon('play', 12)}<span>载入</span></button>
+          <button class="ghost copy-snippet" data-sql="${esc(item.sql)}">${icon('copy', 12)}<span>复制</span></button>
+          ${item.isCustom ? `<button class="ghost delete-snippet" data-index="${item.customIndex}">${icon('trash-2', 12)}<span>删除</span></button>` : ''}
+        </div>
+      </div>
+      <small>${esc(item.desc || '')}</small>
+      <pre>${esc(item.sql)}</pre>
+    </div>
+  `).join('');
+
+  $$('.load-snippet').forEach(btn => btn.onclick = () => {
+    $('#sql').value = btn.dataset.sql;
+    updateSQLHighlight();
+    $('#snippetsDialog').close();
+    toast('已载入 SQL 到工作台');
+  });
+  $$('.copy-snippet').forEach(btn => btn.onclick = () => copyText(btn.dataset.sql, 'SQL 片段已复制'));
+  $$('.delete-snippet').forEach(btn => btn.onclick = () => {
+    const idx = Number(btn.dataset.index);
+    const list = getCustomSnippets();
+    list.splice(idx, 1);
+    saveCustomSnippets(list);
+    renderSnippetsModal();
+    toast('已删除自定义片段');
+  });
+
+  const history = getQueryHistory();
+  $('#historyList').innerHTML = history.length ? history.map(item => `
+    <div class="snippet-card">
+      <div class="snippet-card-head">
+        <strong>${esc(item.cluster)} · ${date(item.at)}</strong>
+        <div class="snippet-card-actions">
+          <small>${item.elapsed_ms || 0}ms · ${item.rows || 0}行</small>
+          <button class="ghost load-snippet" data-sql="${esc(item.sql)}">${icon('play', 12)}<span>载入</span></button>
+          <button class="ghost copy-snippet" data-sql="${esc(item.sql)}">${icon('copy', 12)}<span>复制</span></button>
+        </div>
+      </div>
+      <pre>${esc(item.sql)}</pre>
+    </div>
+  `).join('') : '<div class="empty">暂无查询历史记录</div>';
+
+  $$('#historyList .load-snippet').forEach(btn => btn.onclick = () => {
+    $('#sql').value = btn.dataset.sql;
+    updateSQLHighlight();
+    $('#snippetsDialog').close();
+    toast('已载入历史 SQL 到工作台');
+  });
+  $$('#historyList .copy-snippet').forEach(btn => btn.onclick = () => copyText(btn.dataset.sql, '历史 SQL 已复制'));
+}
+
+$('#openSnippets').onclick = () => {
+  renderSnippetsModal();
+  $('#snippetsDialog').showModal();
+};
+$$('.close-snippets').forEach(btn => btn.onclick = () => $('#snippetsDialog').close());
+
+$$('[data-snippet-tab]').forEach(button => button.onclick = () => {
+  $$('[data-snippet-tab]').forEach(item => item.classList.toggle('active', item === button));
+  $$('[data-snippet-panel]').forEach(panel => panel.classList.toggle('hidden', panel.dataset.snippetPanel !== button.dataset.snippetTab));
+});
+
+$('#saveCurrentAsSnippet').onclick = () => {
+  const sql = $('#sql').value.trim();
+  if (!sql) { toast('编辑器中没有 SQL 语句'); return; }
+  const title = prompt('请输入片段名称：');
+  if (!title) return;
+  const desc = prompt('请输入片段说明（可选）：') || '';
+  const custom = getCustomSnippets();
+  custom.unshift({title, desc, sql});
+  saveCustomSnippets(custom);
+  renderSnippetsModal();
+  toast('已保存为自定义片段');
+};
+
+$('#clearQueryHistory').onclick = () => {
+  if (!confirm('确认清空所有查询历史记录？')) return;
+  localStorage.removeItem('clickhouse_console_history');
+  renderSnippetsModal();
+  toast('查询历史已清空');
+};
 
 async function loadDatabases() {
   try {
@@ -540,243 +862,223 @@ async function loadTables(database, databaseButton) {
             <button class="table-action query-action" title="在工作台查询" aria-label="查询 ${esc(row.name)}">${icon('play')}</button>
           </div>
         </div>
-        <div class="ddl-panel hidden"><div class="ddl-heading"><span>建表语句</span><button class="copy-ddl" title="复制建表语句" aria-label="复制建表语句" disabled>${icon('copy')}</button></div><pre>加载中…</pre></div>
-      </div>`).join('') : '<div class="empty">暂无数据表</div>';
-    $$('#tables .ddl-action').forEach(button => button.onclick = () => toggleDDL(button));
-    $$('#tables .query-action').forEach(button => button.onclick = () => openTableInWorkbench(button.closest('.table-entry').dataset.db, button.closest('.table-entry').dataset.table));
+      </div>`).join('') : '<div class="empty">该数据库下没有数据表</div>';
+    $$('#tables .table-entry').forEach(entry => {
+      entry.querySelector('.ddl-action').onclick = () => toggleTableDDL(entry);
+      entry.querySelector('.query-action').onclick = () => jumpToQuery(entry.dataset.db, entry.dataset.table);
+    });
   } catch (error) { toast(error.message); }
 }
 
 async function exportDatabaseSchema(database, button) {
   button.disabled = true;
+  button.classList.add('loading');
   try {
     const endpoint = new URL('schema/export', apiRoot);
     endpoint.searchParams.set('database', database);
-    const response = await fetch(endpoint);
-    if (response.status === 401) {
-      showLogin();
-      throw new Error('登录已过期');
-    }
+    const response = await fetch(endpoint, {headers: state.csrf ? {'X-CSRF-Token': state.csrf} : {}});
     if (!response.ok) {
       let message = `导出失败 (${response.status})`;
-      try { message = (await response.json()).error || message; } catch {}
+      try { message = (await response.json())?.error || message; } catch {}
       throw new Error(message);
     }
-    const blob = await response.blob();
+    const sql = await response.text();
+    const blob = new Blob([sql], {type: 'text/sql; charset=utf-8'});
     const objectURL = URL.createObjectURL(blob);
     const link = document.createElement('a');
+    const filename = response.headers.get('X-Export-Filename') || `${database}-schema.sql`;
     link.href = objectURL;
-    link.download = response.headers.get('X-Export-Filename') || `${database.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')}-schema.sql`;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
     URL.revokeObjectURL(objectURL);
-    toast(`${database} 建表 SQL 已导出`);
-  } catch (error) {
-    toast(error.message);
-  } finally {
+    toast(`已导出 ${database} 的建表 SQL`);
+  } catch (error) { toast(error.message); }
+  finally {
     button.disabled = false;
+    button.classList.remove('loading');
   }
 }
 
-async function toggleDDL(button) {
-  const entry = button.closest('.table-entry');
-  const panel = entry.querySelector('.ddl-panel');
-  if (button.dataset.loaded === 'true') {
-    const willShow = panel.classList.contains('hidden');
-    panel.classList.toggle('hidden', !willShow);
-    button.classList.toggle('active', willShow);
-    button.setAttribute('aria-expanded', String(willShow));
+async function toggleTableDDL(entry) {
+  const database = entry.dataset.db;
+  const table = entry.dataset.table;
+  const button = entry.querySelector('.ddl-action');
+  const existing = entry.querySelector('.ddl-panel');
+  if (existing) {
+    existing.remove();
+    button.classList.remove('active');
+    button.setAttribute('aria-expanded', 'false');
     return;
   }
-  panel.classList.remove('hidden');
-  button.classList.add('active');
-  button.setAttribute('aria-expanded', 'true');
   button.disabled = true;
   try {
-    const sql = `SHOW CREATE TABLE ${quoteIdentifier(entry.dataset.db)}.${quoteIdentifier(entry.dataset.table)}`;
-    const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql})});
-    const statement = String(result.data?.[0]?.statement || Object.values(result.data?.[0] || {})[0] || '未返回建表语句');
-    entry.querySelector('pre').textContent = statement;
-    const copyButton = entry.querySelector('.copy-ddl');
-    copyButton.disabled = false;
-    copyButton.onclick = () => copyText(statement);
-    button.dataset.loaded = 'true';
-  } catch (error) {
-    entry.querySelector('pre').textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+    const result = await api('/api/query', {method: 'POST', body: JSON.stringify({sql: `SHOW CREATE TABLE ${quoteIdentifier(database)}.${quoteIdentifier(table)}`})});
+    const ddl = String(result.data?.[0]?.statement || result.data?.[0]?.['CREATE TABLE'] || '未读取到建表语句');
+    const panel = document.createElement('div');
+    panel.className = 'ddl-panel';
+    panel.innerHTML = `<div class="ddl-heading"><span>建表语句</span><button type="button" class="copy-ddl" title="复制建表语句" aria-label="复制建表语句">${icon('copy', 13)}</button></div><pre>${esc(ddl)}</pre>`;
+    panel.querySelector('.copy-ddl').onclick = () => copyText(ddl, '建表语句已复制');
+    entry.appendChild(panel);
+    button.classList.add('active');
+    button.setAttribute('aria-expanded', 'true');
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
 }
 
-async function openTableInWorkbench(database, table) {
+async function jumpToQuery(database, table) {
   activateView('query');
-  try { await loadEditorDatabases(database, table); }
-  catch (error) { toast(error.message); }
-}
-
-async function copyText(text, successMessage = '建表语句已复制') {
   try {
-    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
-    else {
-      const helper = document.createElement('textarea');
-      helper.value = text;
-      helper.style.position = 'fixed';
-      helper.style.opacity = '0';
-      document.body.appendChild(helper);
-      helper.select();
-      document.execCommand('copy');
-      helper.remove();
-    }
-    toast(successMessage);
-  } catch { toast('复制失败，请手动复制'); }
-}
-
-$('#refreshSchema').onclick = loadDatabases;
-
-async function loadManagedClusters() {
-  try {
-    state.managedClusters = await api('/api/clusters');
-    $('#clusterRows').innerHTML = state.managedClusters.map(cluster => `<tr><td><strong>${esc(cluster.alias)}</strong></td><td><span class="tag">${cluster.source === 'platform' ? '平台' : '环境变量'}</span></td><td class="code" title="${esc(cluster.url)}">${esc(cluster.url)}</td><td>${esc(cluster.database)}</td><td><span class="tag ok">已加密配置</span></td><td>${cluster.source === 'platform' ? `<div class="row-actions"><button class="ghost edit-cluster" data-id="${esc(cluster.id)}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-cluster" data-id="${esc(cluster.id)}">${icon('trash-2', 13)}<span>删除</span></button></div>` : '<span class="muted">只读</span>'}</td></tr>`).join('');
-    $$('.edit-cluster').forEach(button => button.onclick = () => openClusterEditor(button.dataset.id));
-    $$('.delete-cluster').forEach(button => button.onclick = () => deleteManagedCluster(button.dataset.id));
+    await loadEditorDatabases(database, table);
+    if ($('#queryDatabase').value !== database) $('#queryDatabase').value = database;
+    if ($('#queryTable').value !== table) $('#queryTable').value = table;
+    await stageTableQuery(database, table);
+    acceptSuggestedSQL();
   } catch (error) { toast(error.message); }
 }
 
-function configureCredentialFields(enabled, required) {
-  $('#credentialFields').classList.toggle('hidden', !enabled);
-  const user = $('#clusterManageForm').elements.clusterUser;
-  user.required = required;
-  if (!enabled) {
-    user.value = '';
-    $('#clusterManageForm').elements.clusterPassword.value = '';
-  }
+async function loadManagedClusters() {
+  try {
+    const items = await api('/api/clusters');
+    state.managedClusters = items;
+    $('#clusterRows').innerHTML = items.length ? items.map(cluster => `<tr>
+      <td><strong>${esc(cluster.alias)}</strong></td>
+      <td><span class="tag">${cluster.source === 'managed' ? '平台管理' : '环境变量'}</span></td>
+      <td>${esc(cluster.url)}</td><td>${esc(cluster.database || 'default')}</td>
+      <td><span class="tag ${cluster.credentials_present ? 'ok' : ''}">${cluster.credentials_present ? '已配置' : '无认证'}</span></td>
+      <td><div class="row-actions">${cluster.source === 'managed' ? `<button class="ghost edit-cluster" data-id="${cluster.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-cluster" data-id="${cluster.id}">${icon('trash-2', 13)}<span>删除</span></button>` : '<span class="muted">只读</span>'}</div></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">暂无集群配置</td></tr>';
+    $$('.edit-cluster').forEach(button => button.onclick = () => openClusterEditor(Number(button.dataset.id)));
+    $$('.delete-cluster').forEach(button => button.onclick = () => deleteCluster(Number(button.dataset.id)));
+  } catch (error) { toast(error.message); }
 }
 
+$('#refreshSchema').onclick = loadDatabases;
 $('#newCluster').onclick = () => {
   const form = $('#clusterManageForm');
-  form.reset();
-  form.elements.id.value = '';
-  form.elements.alias.disabled = false;
-  form.elements.database.value = 'default';
+  form.reset(); form.elements.id.value = ''; form.elements.database.value = 'default';
   $('#clusterManageTitle').textContent = '添加集群';
   $('#updateCredentialsLabel').classList.add('hidden');
-  configureCredentialFields(true, true);
+  $('#updateCredentials').checked = false;
+  configureCredentialFields(true);
   $('#clusterManageError').textContent = '';
   $('#clusterManageDialog').showModal();
 };
 
 function openClusterEditor(id) {
-  const cluster = state.managedClusters.find(item => item.id === id && item.source === 'platform');
+  const cluster = state.managedClusters.find(item => item.id === id);
   if (!cluster) return;
   const form = $('#clusterManageForm');
   form.reset();
   form.elements.id.value = cluster.id;
   form.elements.alias.value = cluster.alias;
-  form.elements.alias.disabled = true;
   form.elements.url.value = cluster.url;
-  form.elements.database.value = cluster.database;
-  $('#clusterManageTitle').textContent = `编辑 ${cluster.alias}`;
+  form.elements.database.value = cluster.database || 'default';
+  $('#clusterManageTitle').textContent = `编辑集群 ${cluster.alias}`;
   $('#updateCredentialsLabel').classList.remove('hidden');
   $('#updateCredentials').checked = false;
-  configureCredentialFields(false, false);
+  configureCredentialFields(false);
   $('#clusterManageError').textContent = '';
   $('#clusterManageDialog').showModal();
 }
 
-$('#updateCredentials').onchange = event => configureCredentialFields(event.target.checked, event.target.checked);
-$$('.close-cluster-manage').forEach(button => button.onclick = () => {
-  $('#clusterManageForm').reset();
-  $('#clusterManageDialog').close();
-});
-
-async function encryptPayload(payload) {
-  if (!globalThis.crypto?.subtle || !globalThis.isSecureContext) throw new Error('凭据加密需要 HTTPS 或 localhost 安全上下文');
-  const jwk = await api('/api/transport-key');
-  const publicKey = await crypto.subtle.importKey('jwk', jwk, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
-  const aesKey = await crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt']);
-  const rawKey = await crypto.subtle.exportKey('raw', aesKey);
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
-  const ciphertext = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, aesKey, plaintext);
-  const wrappedKey = await crypto.subtle.encrypt({name: 'RSA-OAEP'}, publicKey, rawKey);
-  return {key: base64(wrappedKey), nonce: base64(nonce), ciphertext: base64(ciphertext)};
+function configureCredentialFields(enabled) {
+  const container = $('#credentialFields');
+  container.classList.toggle('hidden', !enabled);
+  container.querySelectorAll('input').forEach(input => { input.disabled = !enabled; if (!enabled) input.value = ''; });
 }
 
-async function encryptClusterCredentials(user, password) { return encryptPayload({user, password}); }
-
-function base64(value) {
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  let binary = '';
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
+$('#updateCredentials').onchange = event => configureCredentialFields(event.target.checked);
+$$('.close-cluster-manage').forEach(button => button.onclick = () => $('#clusterManageDialog').close());
 
 $('#clusterManageForm').onsubmit = async event => {
   event.preventDefault();
   const form = event.currentTarget;
   const id = form.elements.id.value;
-  const updateCredentials = !id || $('#updateCredentials').checked;
+  const userVal = (form.elements.clusterUser?.value || '').trim();
+  const passVal = form.elements.clusterPassword?.value || '';
+  const hasCredentials = Boolean(userVal || passVal);
+  const updateCredentials = !id ? hasCredentials : $('#updateCredentials').checked;
   const submit = $('#saveCluster');
   submit.disabled = true;
-  submit.textContent = '加密并保存…';
   $('#clusterManageError').textContent = '';
   try {
-    const credentials = updateCredentials ? await encryptClusterCredentials(form.elements.clusterUser.value.trim(), form.elements.clusterPassword.value) : {key: '', nonce: '', ciphertext: ''};
-    const payload = {alias: form.elements.alias.value, url: form.elements.url.value, database: form.elements.database.value, update_credentials: updateCredentials, credentials};
-    await api(id ? `/api/clusters/${encodeURIComponent(id)}` : '/api/clusters', {method: id ? 'PUT' : 'POST', body: JSON.stringify(payload)});
-    form.reset();
-    $('#clusterManageDialog').close();
-    const session = await api('/api/session');
-    state.clusters = session.clusters;
-    state.activeCluster = session.active_cluster;
+    const credentials = (updateCredentials && hasCredentials)
+      ? await encryptPayload({user: userVal, password: passVal})
+      : {key: '', nonce: '', ciphertext: ''};
+    const payload = {
+      alias: form.elements.alias.value,
+      url: form.elements.url.value,
+      database: form.elements.database.value || 'default',
+      update_credentials: updateCredentials,
+      credentials
+    };
+    const response = await api(id ? `/api/clusters/${id}` : '/api/clusters', {method: id ? 'PUT' : 'POST', body: JSON.stringify(payload)});
+    state.clusters = response.clusters || state.clusters;
     renderClusterSelector();
+    if (form.elements.clusterPassword) form.elements.clusterPassword.value = '';
+    $('#clusterManageDialog').close();
     await loadManagedClusters();
-    toast(id ? '集群配置已更新' : '集群已添加');
+    toast(id ? '集群已更新' : '集群已添加');
   } catch (error) { $('#clusterManageError').textContent = error.message; }
-  finally {
-    form.elements.clusterPassword.value = '';
-    submit.disabled = false;
-    submit.textContent = '保存';
-  }
+  finally { submit.disabled = false; }
 };
 
-async function deleteManagedCluster(id) {
-  const cluster = state.managedClusters.find(item => item.id === id && item.source === 'platform');
-  if (!cluster || !confirm(`确认删除平台集群 ${cluster.alias}？`)) return;
+async function deleteCluster(id) {
+  const cluster = state.managedClusters.find(item => item.id === id);
+  if (!cluster || !confirm(`确认删除集群 ${cluster.alias}？`)) return;
   try {
-    await api(`/api/clusters/${encodeURIComponent(id)}`, {method: 'DELETE'});
-    const session = await api('/api/session');
-    state.clusters = session.clusters;
+    const response = await api(`/api/clusters/${id}`, {method: 'DELETE'});
+    state.clusters = response.clusters || state.clusters;
     renderClusterSelector();
     await loadManagedClusters();
     toast('集群已删除');
   } catch (error) { toast(error.message); }
 }
 
+async function encryptPayload(payload) {
+  const keyResponse = await api('/api/clusters/transport-key');
+  const serverKey = await importServerPublicKey(keyResponse);
+  const aesKey = crypto.getRandomValues(new Uint8Array(32));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const rawKey = await crypto.subtle.importKey('raw', aesKey, {name: 'AES-GCM'}, false, ['encrypt']);
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const ciphertextBuffer = await crypto.subtle.encrypt({name: 'AES-GCM', iv: nonce}, rawKey, plaintext);
+  const wrappedKey = await crypto.subtle.encrypt({name: 'RSA-OAEP'}, serverKey, aesKey);
+  return {key: bytesToBase64(new Uint8Array(wrappedKey)), nonce: bytesToBase64(nonce), ciphertext: bytesToBase64(new Uint8Array(ciphertextBuffer))};
+}
+
+async function importServerPublicKey(keyData) {
+  if (keyData && typeof keyData === 'object' && keyData.kty === 'RSA') {
+    return crypto.subtle.importKey('jwk', keyData, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
+  }
+  const pem = typeof keyData === 'string' ? keyData : (keyData?.key || '');
+  const clean = pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\r|\n/g, '');
+  const binary = Uint8Array.from(atob(clean), char => char.charCodeAt(0));
+  return crypto.subtle.importKey('spki', binary.buffer, {name: 'RSA-OAEP', hash: 'SHA-256'}, false, ['encrypt']);
+}
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+// Alerting System
 async function loadAlerting() {
   try {
-    const config = await api('/api/alerting/config');
-    state.alertingConfig = config;
-    $('#alertingStatus').className = `tag ${config.running ? 'ok' : config.error ? 'error' : ''}`;
-    $('#alertingStatus').textContent = config.running ? '调度运行中' : config.enabled ? '连接异常' : '未启用';
-    $('#alertingSource').textContent = `${config.source === 'environment' ? '环境变量' : '平台'} · ${config.driver || '未选择存储'} · 保留 ${config.history_limit || 300} 条`;
-    $('#configureAlerting').disabled = config.source === 'environment';
-    $('#configureAlerting').title = config.source === 'environment' ? '环境变量配置只读' : '';
-    $('#newAlertRule').disabled = !config.running;
-    $('#newAlertWebhook').disabled = !config.running;
-    if (config.error) toast(config.error);
-    if (!config.running) {
-      state.alertRules = []; state.alertWebhooks = [];
-      $('#alertRuleRows').innerHTML = '<tr><td colspan="7" class="empty">请先配置并启用报警存储</td></tr>';
-      $('#alertWebhookRows').innerHTML = '<tr><td colspan="6" class="empty">请先配置并启用报警存储</td></tr>';
-      $('#alertEventRows').innerHTML = '<tr><td colspan="6" class="empty">暂无记录</td></tr>';
-      $('#alertDeliveryRows').innerHTML = '<tr><td colspan="6" class="empty">暂无记录</td></tr>';
-      return;
-    }
-    const [rules, webhooks, events, deliveries] = await Promise.all([
-      api('/api/alerting/rules'), api('/api/alerting/webhooks'), api('/api/alerting/events'), api('/api/alerting/deliveries')
+    const [config, rules, webhooks, events, deliveries] = await Promise.all([
+      api('/api/alerting/config'),
+      api('/api/alerting/rules').catch(() => []),
+      api('/api/alerting/webhooks').catch(() => []),
+      api('/api/alerting/events?limit=100').catch(() => []),
+      api('/api/alerting/deliveries?limit=100').catch(() => [])
     ]);
+    state.alertingConfig = config;
+    $('#alertingStatus').className = `tag ${config.enabled ? 'ok' : ''}`;
+    $('#alertingStatus').textContent = config.enabled ? '运行中' : config.configured ? '已暂停' : '未配置';
+    $('#alertingSource').textContent = config.configured ? `${config.driver.toUpperCase()} · 保留 ${config.history_limit} 条` : '尚未配置报警数据库';
     state.alertRules = rules || [];
     state.alertWebhooks = webhooks || [];
     renderAlertRules(); renderAlertWebhooks(); renderAlertEvents(events || []); renderAlertDeliveries(deliveries || []);
@@ -786,17 +1088,36 @@ async function loadAlerting() {
 function renderAlertRules() {
   $('#alertRuleRows').innerHTML = state.alertRules.length ? state.alertRules.map(rule => `<tr>
     <td><strong>#${rule.id}</strong></td><td><strong>${esc(rule.name)}</strong><div class="code table-subline" title="${esc(rule.sql)}">${esc(rule.sql)}</div></td><td><span class="tag">${esc(rule.cluster)}</span></td>
-    <td>${formatSecondsCompact(rule.interval_seconds)} / ${formatSecondsCompact(rule.for_seconds)}</td><td><span class="tag ${rule.state === 'firing' ? 'error' : rule.state === 'pending' ? 'pending' : 'ok'}">${rule.enabled ? esc(rule.state) : 'disabled'}</span>${rule.last_error ? `<div class="error table-subline" title="${esc(rule.last_error)}">${esc(rule.last_error)}</div>` : ''}</td>
+    <td>${formatSecondsCompact(rule.interval_seconds)} / ${rule.repeat_interval_seconds ? `${formatSecondsCompact(rule.repeat_interval_seconds)}重复` : '单次'}</td><td><span class="tag ${rule.state === 'firing' ? 'error' : rule.state === 'pending' ? 'pending' : 'ok'}">${rule.enabled ? esc(rule.state) : 'disabled'}</span>${rule.last_error ? `<div class="error table-subline" title="${esc(rule.last_error)}">${esc(rule.last_error)}</div>` : ''}</td>
     <td class="code" title="${esc(rule.last_value || '')}">${esc(rule.last_value || '—')}<div class="muted table-subline">${rule.last_evaluated_at ? date(rule.last_evaluated_at) : '尚未执行'}</div></td>
     <td><div class="row-actions"><button class="ghost edit-alert-rule" data-id="${rule.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-alert-rule" data-id="${rule.id}">${icon('trash-2', 13)}<span>删除</span></button></div></td></tr>`).join('') : '<tr><td colspan="7" class="empty">暂无报警规则</td></tr>';
   $$('.edit-alert-rule').forEach(button => button.onclick = () => openAlertRuleEditor(Number(button.dataset.id)));
   $$('.delete-alert-rule').forEach(button => button.onclick = () => deleteAlertRule(Number(button.dataset.id)));
 }
 
+const channelNames = {generic: '通用', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉', slack: 'Slack'};
+
 function renderAlertWebhooks() {
-  $('#alertWebhookRows').innerHTML = state.alertWebhooks.length ? state.alertWebhooks.map(webhook => `<tr><td><strong>#${webhook.id}</strong></td><td><strong>${esc(webhook.name)}</strong></td><td class="code" title="${esc(webhook.url_hint)}">${esc(webhook.url_hint)}</td><td><span class="tag ${webhook.auth_configured ? 'ok' : ''}">${webhook.auth_configured ? '已加密配置' : '无'}</span></td><td>${date(webhook.updated_at)}</td><td><div class="row-actions"><button class="ghost edit-alert-webhook" data-id="${webhook.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-alert-webhook" data-id="${webhook.id}">${icon('trash-2', 13)}<span>删除</span></button></div></td></tr>`).join('') : '<tr><td colspan="6" class="empty">暂无 Webhook</td></tr>';
+  $('#alertWebhookRows').innerHTML = state.alertWebhooks.length ? state.alertWebhooks.map(webhook => `<tr>
+    <td><strong>#${webhook.id}</strong></td>
+    <td><strong>${esc(webhook.name)}</strong></td>
+    <td><span class="tag">${esc(channelNames[webhook.channel_type] || webhook.channel_type || '通用')}</span></td>
+    <td class="code" title="${esc(webhook.url_hint)}">${esc(webhook.url_hint)}</td>
+    <td><span class="tag ${webhook.auth_configured ? 'ok' : ''}">${webhook.auth_configured ? '已配置' : '无'}</span></td>
+    <td>${date(webhook.updated_at)}</td>
+    <td><div class="row-actions"><button class="ghost test-alert-webhook" data-id="${webhook.id}">${icon('send', 13)}<span>测试</span></button><button class="ghost edit-alert-webhook" data-id="${webhook.id}">${icon('pencil', 13)}<span>编辑</span></button><button class="ghost delete-alert-webhook" data-id="${webhook.id}">${icon('trash-2', 13)}<span>删除</span></button></div></td></tr>`).join('') : '<tr><td colspan="7" class="empty">暂无 Webhook</td></tr>';
+  $$('.test-alert-webhook').forEach(button => button.onclick = () => testAlertWebhook(Number(button.dataset.id)));
   $$('.edit-alert-webhook').forEach(button => button.onclick = () => openAlertWebhookEditor(Number(button.dataset.id)));
   $$('.delete-alert-webhook').forEach(button => button.onclick = () => deleteAlertWebhook(Number(button.dataset.id)));
+}
+
+async function testAlertWebhook(id) {
+  try {
+    const res = await api(`/api/alerting/webhooks/${id}/test`, {method: 'POST'});
+    if (res.error) toast(`测试响应异常: ${res.error}`);
+    else toast(`测试消息发送成功 (HTTP ${res.http_status})`);
+    await loadAlerting();
+  } catch (error) { toast(`测试失败: ${error.message}`); }
 }
 
 function renderAlertEvents(items) {
@@ -854,18 +1175,29 @@ function configureAlertTargetFields(enabled) {
   $('#alertWebhookForm').elements.url.required = enabled;
   if (!enabled) { $('#alertWebhookForm').elements.url.value = ''; $('#alertWebhookForm').elements.authorization.value = ''; }
 }
-$('#newAlertWebhook').onclick = () => { const form=$('#alertWebhookForm');form.reset();form.elements.id.value='';$('#alertWebhookTitle').textContent='新建 Webhook';$('#updateAlertTargetLabel').classList.add('hidden');configureAlertTargetFields(true);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); };
-function openAlertWebhookEditor(id) { const item=state.alertWebhooks.find(value=>value.id===id);if(!item)return;const form=$('#alertWebhookForm');form.reset();form.elements.id.value=item.id;form.elements.name.value=item.name;$('#alertWebhookTitle').textContent=`编辑 #${item.id}`;$('#updateAlertTargetLabel').classList.remove('hidden');$('#updateAlertTarget').checked=false;configureAlertTargetFields(false);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); }
+$('#newAlertWebhook').onclick = () => { const form=$('#alertWebhookForm');form.reset();form.elements.id.value='';form.elements.channelType.value='generic';$('#alertWebhookTitle').textContent='新建 Webhook';$('#updateAlertTargetLabel').classList.add('hidden');configureAlertTargetFields(true);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); };
+function openAlertWebhookEditor(id) { const item=state.alertWebhooks.find(value=>value.id===id);if(!item)return;const form=$('#alertWebhookForm');form.reset();form.elements.id.value=item.id;form.elements.name.value=item.name;form.elements.channelType.value=item.channel_type||'generic';$('#alertWebhookTitle').textContent=`编辑 #${item.id}`;$('#updateAlertTargetLabel').classList.remove('hidden');$('#updateAlertTarget').checked=false;configureAlertTargetFields(false);$('#alertWebhookError').textContent='';$('#alertWebhookDialog').showModal(); }
 $('#updateAlertTarget').onchange = event => configureAlertTargetFields(event.target.checked);
 $$('.close-alert-webhook').forEach(button => button.onclick = () => $('#alertWebhookDialog').close());
-$('#alertWebhookForm').onsubmit = async event => { event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const updateTarget=!id||$('#updateAlertTarget').checked;const submit=$('#saveAlertWebhook');submit.disabled=true;$('#alertWebhookError').textContent='';try{const target=updateTarget?await encryptPayload({url:form.elements.url.value,authorization:form.elements.authorization.value}):{key:'',nonce:'',ciphertext:''};await api(id?`/api/alerting/webhooks/${id}`:'/api/alerting/webhooks',{method:id?'PUT':'POST',body:JSON.stringify({name:form.elements.name.value,update_target:updateTarget,target})});form.elements.authorization.value='';form.elements.url.value='';$('#alertWebhookDialog').close();await loadAlerting();toast(id?'Webhook 已更新':'Webhook 已创建')}catch(error){$('#alertWebhookError').textContent=error.message}finally{submit.disabled=false}};
+$('#alertWebhookForm').onsubmit = async event => {
+  event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const updateTarget=!id||$('#updateAlertTarget').checked;const submit=$('#saveAlertWebhook');submit.disabled=true;$('#alertWebhookError').textContent='';
+  try {
+    const target=updateTarget?await encryptPayload({url:form.elements.url.value,authorization:form.elements.authorization.value}):{key:'',nonce:'',ciphertext:''};
+    await api(id?`/api/alerting/webhooks/${id}`:'/api/alerting/webhooks',{method:id?'PUT':'POST',body:JSON.stringify({name:form.elements.name.value,channel_type:form.elements.channelType.value,update_target:updateTarget,target})});
+    form.elements.authorization.value='';form.elements.url.value='';$('#alertWebhookDialog').close();await loadAlerting();toast(id?'Webhook 已更新':'Webhook 已创建');
+  } catch(error){$('#alertWebhookError').textContent=error.message}finally{submit.disabled=false}
+};
 async function deleteAlertWebhook(id){const item=state.alertWebhooks.find(value=>value.id===id);if(!item||!confirm(`确认删除 Webhook #${id} ${item.name}？`))return;try{await api(`/api/alerting/webhooks/${id}`,{method:'DELETE'});await loadAlerting();toast('Webhook 已删除')}catch(error){toast(error.message)}}
 
 function populateAlertRuleOptions(form) { form.elements.cluster.replaceChildren(...state.clusters.map(item=>new Option(item.alias,item.alias)));form.elements.webhookId.replaceChildren(new Option('不发送，仅记录',''),...state.alertWebhooks.map(item=>new Option(`#${item.id} ${item.name}`,String(item.id)))); }
-$('#newAlertRule').onclick = () => {const form=$('#alertRuleForm');form.reset();form.elements.id.value='';form.elements.intervalSeconds.value=60;form.elements.forSeconds.value=0;form.elements.enabled.checked=true;populateAlertRuleOptions(form);$('#alertRuleTitle').textContent='新建报警规则';$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();};
-function openAlertRuleEditor(id){const item=state.alertRules.find(value=>value.id===id);if(!item)return;const form=$('#alertRuleForm');form.reset();populateAlertRuleOptions(form);form.elements.id.value=item.id;form.elements.name.value=item.name;form.elements.cluster.value=item.cluster;form.elements.intervalSeconds.value=item.interval_seconds;form.elements.forSeconds.value=item.for_seconds;form.elements.webhookId.value=item.webhook_id?String(item.webhook_id):'';form.elements.enabled.checked=item.enabled;form.elements.sql.value=item.sql;$('#alertRuleTitle').textContent=`编辑规则 #${item.id}`;$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();}
+$('#newAlertRule').onclick = () => {const form=$('#alertRuleForm');form.reset();form.elements.id.value='';form.elements.intervalSeconds.value=60;form.elements.forSeconds.value=0;form.elements.repeatIntervalSeconds.value=0;form.elements.enabled.checked=true;populateAlertRuleOptions(form);$('#alertRuleTitle').textContent='新建报警规则';$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();};
+function openAlertRuleEditor(id){const item=state.alertRules.find(value=>value.id===id);if(!item)return;const form=$('#alertRuleForm');form.reset();populateAlertRuleOptions(form);form.elements.id.value=item.id;form.elements.name.value=item.name;form.elements.cluster.value=item.cluster;form.elements.intervalSeconds.value=item.interval_seconds;form.elements.forSeconds.value=item.for_seconds;form.elements.repeatIntervalSeconds.value=item.repeat_interval_seconds||0;form.elements.webhookId.value=item.webhook_id?String(item.webhook_id):'';form.elements.enabled.checked=item.enabled;form.elements.sql.value=item.sql;$('#alertRuleTitle').textContent=`编辑规则 #${item.id}`;$('#alertRuleError').textContent='';$('#alertRuleDialog').showModal();}
 $$('.close-alert-rule').forEach(button => button.onclick = () => $('#alertRuleDialog').close());
-$('#alertRuleForm').onsubmit = async event => {event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const webhookId=form.elements.webhookId.value;const payload={name:form.elements.name.value,cluster:form.elements.cluster.value,sql:form.elements.sql.value,interval_seconds:Number(form.elements.intervalSeconds.value),for_seconds:Number(form.elements.forSeconds.value),webhook_id:webhookId?Number(webhookId):null,enabled:form.elements.enabled.checked};try{await api(id?`/api/alerting/rules/${id}`:'/api/alerting/rules',{method:id?'PUT':'POST',body:JSON.stringify(payload)});$('#alertRuleDialog').close();await loadAlerting();toast(id?'报警规则已更新':'报警规则已创建')}catch(error){$('#alertRuleError').textContent=error.message}};
+$('#alertRuleForm').onsubmit = async event => {
+  event.preventDefault();const form=event.currentTarget;const id=form.elements.id.value;const webhookId=form.elements.webhookId.value;
+  const payload={name:form.elements.name.value,cluster:form.elements.cluster.value,sql:form.elements.sql.value,interval_seconds:Number(form.elements.intervalSeconds.value),for_seconds:Number(form.elements.forSeconds.value),repeat_interval_seconds:Number(form.elements.repeatIntervalSeconds.value)||0,webhook_id:webhookId?Number(webhookId):null,enabled:form.elements.enabled.checked};
+  try{await api(id?`/api/alerting/rules/${id}`:'/api/alerting/rules',{method:id?'PUT':'POST',body:JSON.stringify(payload)});$('#alertRuleDialog').close();await loadAlerting();toast(id?'报警规则已更新':'报警规则已创建')}catch(error){$('#alertRuleError').textContent=error.message}
+};
 async function deleteAlertRule(id){const item=state.alertRules.find(value=>value.id===id);if(!item||!confirm(`确认删除报警规则 #${id} ${item.name}？`))return;try{await api(`/api/alerting/rules/${id}`,{method:'DELETE'});await loadAlerting();toast('报警规则已删除')}catch(error){toast(error.message)}}
 function formatSecondsCompact(input){const seconds=Number(input)||0;if(seconds===0)return '立即';if(seconds%86400===0)return `${seconds/86400}天`;if(seconds%3600===0)return `${seconds/3600}小时`;if(seconds%60===0)return `${seconds/60}分`;return `${seconds}秒`}
 
@@ -1022,14 +1354,14 @@ function renderMonitor(snapshot, cached, recordedAt) {
   ];
   const events = [...(snapshot.events || [])].sort((a, b) => number(b.value) - number(a.value));
   const partsRows = parts.map(row => `<tr><td>${esc(row.database)}</td><td class="code" title="${esc(row.table)}">${esc(row.table)}</td><td>${esc(row.disk_name)}</td><td>${esc(formatBytes(row.bytes))}</td><td>${esc(formatCount(row.parts))}</td><td>${esc(formatCount(row.rows))}</td></tr>`).join('');
-  const eventRows = events.map(row => `<tr><td class="code" title="${esc(row.event)}">${esc(row.event)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
-  const metricRows = metrics.map(row => `<tr><td class="code" title="${esc(row.metric)}">${esc(row.metric)}</td><td>${esc(formatCount(row.value))}</td></tr>`).join('');
+  const eventRows = events.map(row => `<tr><td class="code metric-name-cell" title="${esc(row.event)}">${esc(row.event)}</td><td class="metric-val-cell">${esc(formatCount(row.value))}</td></tr>`).join('');
+  const metricRows = metrics.map(row => `<tr><td class="code metric-name-cell" title="${esc(row.metric)}">${esc(row.metric)}</td><td class="metric-val-cell">${esc(formatCount(row.value))}</td></tr>`).join('');
   $('#monitorContent').innerHTML = `
     <div class="metric-cards">${cards.map(card => `<div class="metric-card"><small>${card[0]}</small><strong title="${esc(card[1])}">${esc(card[1])}</strong></div>`).join('')}</div>
     <div class="monitor-grid">
       <div class="panel monitor-panel monitor-panel-wide"><div class="panel-title"><strong>最大数据表 / Parts</strong><span>前 ${parts.length} 项 · ${esc(formatBytes(partBytes))} · ${disks.length} 个磁盘</span></div><div class="table-wrap"><table><thead><tr><th>数据库</th><th>数据表</th><th>磁盘</th><th>空间</th><th>Parts</th><th>行数</th></tr></thead><tbody>${partsRows}</tbody></table></div></div>
-      <div class="panel monitor-panel"><div class="panel-title"><strong>累计事件</strong><span>${events.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>事件</th><th>累计值</th></tr></thead><tbody>${eventRows}</tbody></table></div></div>
-      <div class="panel monitor-panel"><div class="panel-title"><strong>实时指标</strong><span>${metrics.length} 项</span></div><div class="table-wrap"><table><thead><tr><th>指标</th><th>当前值</th></tr></thead><tbody>${metricRows}</tbody></table></div></div>
+      <div class="panel monitor-panel"><div class="panel-title"><strong>累计事件</strong><span>${events.length} 项</span></div><div class="table-wrap"><table class="monitor-table"><thead><tr><th style="width:68%">事件名称</th><th style="width:32%;text-align:right">累计值</th></tr></thead><tbody>${eventRows || '<tr><td colspan="2" class="empty">暂无事件</td></tr>'}</tbody></table></div></div>
+      <div class="panel monitor-panel"><div class="panel-title"><strong>实时指标</strong><span>${metrics.length} 项</span></div><div class="table-wrap"><table class="monitor-table"><thead><tr><th style="width:68%">指标名称</th><th style="width:32%;text-align:right">当前值</th></tr></thead><tbody>${metricRows || '<tr><td colspan="2" class="empty">暂无指标</td></tr>'}</tbody></table></div></div>
     </div>`;
 }
 
@@ -1062,6 +1394,20 @@ function formatBytes(input) {
 }
 function date(input) { return new Date(input).toLocaleString(); }
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 2600); }
+async function copyText(text, successToast = '已复制到剪贴板') {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(successToast);
+  } catch {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+    toast(successToast);
+  }
+}
 
 hydrateIcons();
 updateSQLHighlight();

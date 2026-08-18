@@ -253,6 +253,7 @@ func (s *Server) validateAlertRule(input alerting.RuleInput) error {
 
 type webhookRequest struct {
 	Name         string             `json:"name"`
+	ChannelType  string             `json:"channel_type"`
 	UpdateTarget bool               `json:"update_target"`
 	Target       credentialEnvelope `json:"target"`
 }
@@ -275,7 +276,7 @@ func (s *Server) createAlertWebhook(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	item, err := s.alerts.CreateWebhook(r.Context(), input.Name, target, auth)
+	item, err := s.alerts.CreateWebhook(r.Context(), input.Name, input.ChannelType, target, auth)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -301,13 +302,35 @@ func (s *Server) updateAlertWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	item, err := s.alerts.UpdateWebhook(r.Context(), id, input.Name, target, auth, input.UpdateTarget)
+	item, err := s.alerts.UpdateWebhook(r.Context(), id, input.Name, input.ChannelType, target, auth, input.UpdateTarget)
 	if err != nil {
 		alertingError(w, err)
 		return
 	}
 	s.auditAlert(r, "alert.webhook.update", fmt.Sprintf("#%d %s", item.ID, item.Name))
 	writeJSON(w, 200, item)
+}
+func (s *Server) testAlertWebhook(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.alerts.TestWebhook(r.Context(), id)
+	if err != nil {
+		alertingError(w, err)
+		return
+	}
+	s.auditAlert(r, "alert.webhook.test", fmt.Sprintf("#%d", id))
+	errMsg := ""
+	if res.Err != nil {
+		errMsg = res.Err.Error()
+	}
+	writeJSON(w, 200, map[string]any{
+		"status":      "ok",
+		"http_status": res.StatusCode,
+		"body":        res.Body,
+		"error":       errMsg,
+	})
 }
 func (s *Server) deleteAlertWebhook(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)

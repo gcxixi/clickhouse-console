@@ -228,3 +228,82 @@ func TestDatabaseSchema(t *testing.T) {
 		t.Fatalf("queries = %#v", queries)
 	}
 }
+
+func TestProcesses(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "system.processes") {
+			http.Error(w, "expected system.processes query", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"meta":[{"name":"query_id","type":"String"}],"data":[{"query_id":"q-123","user":"default","address":"127.0.0.1","elapsed":2.5,"read_rows":1000,"read_bytes":4096,"total_rows_approx":10000,"memory_usage":1048576,"query":"SELECT count() FROM numbers(10000000)"}],"rows":1}`)
+	}))
+	defer ts.Close()
+
+	client := New(ts.URL, "", "", "default", 100, time.Second)
+	processes, err := client.Processes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(processes) != 1 {
+		t.Fatalf("processes count = %d; want 1", len(processes))
+	}
+	p := processes[0]
+	if p.QueryID != "q-123" || p.User != "default" || p.Elapsed != 2.5 || p.ReadRows != 1000 || p.ReadBytes != 4096 || p.MemoryUsage != 1048576 || !strings.Contains(p.Query, "numbers") {
+		t.Fatalf("unexpected process: %#v", p)
+	}
+}
+
+func TestKillQuery(t *testing.T) {
+	var executedQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		executedQuery = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"rows":0}`)
+	}))
+	defer ts.Close()
+
+	client := New(ts.URL, "", "", "default", 100, time.Second)
+	if err := client.KillQuery(context.Background(), ""); err == nil {
+		t.Fatal("empty queryID should fail")
+	}
+	if err := client.KillQuery(context.Background(), "q'123; DROP"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(executedQuery, "KILL QUERY WHERE query_id = 'q\\'123; DROP' SYNC") {
+		t.Fatalf("unexpected kill query: %q", executedQuery)
+	}
+}
+
+func TestStreamQuery(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		if !strings.Contains(query, "FORMAT CSVWithNames") {
+			http.Error(w, "missing format", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv")
+		_, _ = io.WriteString(w, "n,name\n1,hello\n2,world\n")
+	}))
+	defer ts.Close()
+
+	client := New(ts.URL, "", "", "default", 100, time.Second)
+	var buf strings.Builder
+	err := client.StreamQuery(context.Background(), "SELECT n, name FROM table", "CSVWithNames", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "n,name\n1,hello\n2,world\n") {
+		t.Fatalf("streamed content = %q", buf.String())
+	}
+
+	if err = client.StreamQuery(context.Background(), "DROP TABLE abc", "CSVWithNames", &buf); err == nil {
+		t.Fatal("streaming non-query should fail")
+	}
+	if err = client.StreamQuery(context.Background(), "SELECT 1", "invalid format!", &buf); err == nil {
+		t.Fatal("streaming invalid format should fail")
+	}
+}

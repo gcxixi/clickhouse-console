@@ -124,7 +124,7 @@ location /clickhouse/ {
 
 数据保存在权限为 `0600` 的 `console.json` 中，密码只保存 bcrypt 哈希。最多保留 5,000 条审计记录。生产部署应备份数据目录并限制文件系统访问。
 
-报警模块的领域模型、时间窗口、Webhook 协议、三种数据库连接示例和查询结果大数据量展示建议见 [报警设计文档](docs/alerting.md)。平台配置的报警数据库连接串、Webhook 完整 URL 与 Authorization 请求头均使用和集群凭据相同的浏览器端 RSA-OAEP/AES-GCM 封装，并以 AES-256-GCM 密文落盘或落库；API 只返回存储类型、配置状态和 Webhook 地址 origin。
+报警模块的领域模型、时间窗口、Webhook 协议、三种数据库连接示例和查询结果大数据量展示建议见 [报警设计文档](docs/alerting.md)。平台配置的报警数据库连接串、Webhook 完整 URL 与 Authorization 请求头均使用和集群凭据相同的浏览器端 RSA-OAEP/AES-GCM 封装，并以 AES-256-GCM 密文落盘或落库；API 只返回存储类型、配置状态和 Webhook 地址 origin。架构演进与后续优化方向详见 [优化与演进路线图](docs/optimization-roadmap.md)。
 
 ## 开发与验证
 

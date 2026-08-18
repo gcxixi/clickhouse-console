@@ -61,16 +61,17 @@ func (r *SQLRepository) migrate(ctx context.Context) error {
 	}
 	statements := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS alert_webhooks (
-            id %s, name VARCHAR(200) NOT NULL, url_hint VARCHAR(500) NOT NULL,
-            target_encrypted TEXT NOT NULL, auth_encrypted TEXT NOT NULL,
+            id %s, name VARCHAR(200) NOT NULL, channel_type VARCHAR(32) NOT NULL DEFAULT 'generic',
+            url_hint VARCHAR(500) NOT NULL, target_encrypted TEXT NOT NULL, auth_encrypted TEXT NOT NULL,
             auth_configured INTEGER NOT NULL DEFAULT 0, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
         )`, id),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS alert_rules (
             id %s, name VARCHAR(200) NOT NULL, cluster_alias VARCHAR(64) NOT NULL,
             sql_text TEXT NOT NULL, interval_seconds BIGINT NOT NULL, for_seconds BIGINT NOT NULL,
+            repeat_interval_seconds BIGINT NOT NULL DEFAULT 0, silenced_until BIGINT NULL,
             webhook_id BIGINT NULL, enabled INTEGER NOT NULL DEFAULT 1, state VARCHAR(16) NOT NULL DEFAULT 'inactive',
-            active_since BIGINT NULL, last_evaluated_at BIGINT NULL, last_value TEXT NOT NULL,
-            last_error TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+            active_since BIGINT NULL, last_evaluated_at BIGINT NULL, last_delivered_at BIGINT NULL,
+            last_value TEXT NOT NULL, last_error TEXT NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
         )`, id),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS alert_events (
             id %s, rule_id BIGINT NOT NULL, rule_name VARCHAR(200) NOT NULL, cluster_alias VARCHAR(64) NOT NULL,
@@ -88,6 +89,16 @@ func (r *SQLRepository) migrate(ctx context.Context) error {
 		if _, err := r.db.ExecContext(ctx, statement); err != nil {
 			return err
 		}
+	}
+	// Additive migrations for existing databases
+	additive := []string{
+		"ALTER TABLE alert_webhooks ADD COLUMN channel_type VARCHAR(32) NOT NULL DEFAULT 'generic'",
+		"ALTER TABLE alert_rules ADD COLUMN repeat_interval_seconds BIGINT NOT NULL DEFAULT 0",
+		"ALTER TABLE alert_rules ADD COLUMN silenced_until BIGINT NULL",
+		"ALTER TABLE alert_rules ADD COLUMN last_delivered_at BIGINT NULL",
+	}
+	for _, statement := range additive {
+		_, _ = r.db.ExecContext(ctx, statement)
 	}
 	return nil
 }
@@ -125,7 +136,7 @@ func boolInt(value bool) int {
 }
 
 func (r *SQLRepository) Rules(ctx context.Context) ([]Rule, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,name,cluster_alias,sql_text,interval_seconds,for_seconds,webhook_id,enabled,state,active_since,last_evaluated_at,last_value,last_error,created_at,updated_at FROM alert_rules ORDER BY id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,name,cluster_alias,sql_text,interval_seconds,for_seconds,repeat_interval_seconds,silenced_until,webhook_id,enabled,state,active_since,last_evaluated_at,last_delivered_at,last_value,last_error,created_at,updated_at FROM alert_rules ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +153,7 @@ func (r *SQLRepository) Rules(ctx context.Context) ([]Rule, error) {
 }
 
 func (r *SQLRepository) Rule(ctx context.Context, id int64) (Rule, error) {
-	row := r.db.QueryRowContext(ctx, r.bind(`SELECT id,name,cluster_alias,sql_text,interval_seconds,for_seconds,webhook_id,enabled,state,active_since,last_evaluated_at,last_value,last_error,created_at,updated_at FROM alert_rules WHERE id=?`), id)
+	row := r.db.QueryRowContext(ctx, r.bind(`SELECT id,name,cluster_alias,sql_text,interval_seconds,for_seconds,repeat_interval_seconds,silenced_until,webhook_id,enabled,state,active_since,last_evaluated_at,last_delivered_at,last_value,last_error,created_at,updated_at FROM alert_rules WHERE id=?`), id)
 	item, err := scanRule(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Rule{}, ErrNotFound
@@ -154,14 +165,19 @@ type scanner interface{ Scan(...any) error }
 
 func scanRule(row scanner) (Rule, error) {
 	var item Rule
-	var webhookID, activeSince, evaluated sql.NullInt64
-	var enabled, created, updated int64
-	err := row.Scan(&item.ID, &item.Name, &item.Cluster, &item.SQL, &item.IntervalSeconds, &item.ForSeconds, &webhookID, &enabled, &item.State, &activeSince, &evaluated, &item.LastValue, &item.LastError, &created, &updated)
+	var webhookID, activeSince, evaluated, delivered, silenced sql.NullInt64
+	var enabled, created, updated, repeatInterval int64
+	err := row.Scan(&item.ID, &item.Name, &item.Cluster, &item.SQL, &item.IntervalSeconds, &item.ForSeconds, &repeatInterval, &silenced, &webhookID, &enabled, &item.State, &activeSince, &evaluated, &delivered, &item.LastValue, &item.LastError, &created, &updated)
 	if err != nil {
 		return Rule{}, err
 	}
+	item.RepeatIntervalSeconds = repeatInterval
 	item.Enabled = enabled != 0
 	item.CreatedAt, item.UpdatedAt = timeFromMillis(created), timeFromMillis(updated)
+	if silenced.Valid {
+		value := timeFromMillis(silenced.Int64)
+		item.SilencedUntil = &value
+	}
 	if webhookID.Valid {
 		value := webhookID.Int64
 		item.WebhookID = &value
@@ -174,13 +190,17 @@ func scanRule(row scanner) (Rule, error) {
 		value := timeFromMillis(evaluated.Int64)
 		item.LastEvaluatedAt = &value
 	}
+	if delivered.Valid {
+		value := timeFromMillis(delivered.Int64)
+		item.LastDeliveredAt = &value
+	}
 	return item, nil
 }
 
 func (r *SQLRepository) CreateRule(ctx context.Context, input RuleInput) (Rule, error) {
 	now := time.Now().UTC()
-	args := []any{input.Name, input.Cluster, input.SQL, input.IntervalSeconds, input.ForSeconds, input.WebhookID, boolInt(input.Enabled), StateInactive, "", "", millis(now), millis(now)}
-	query := `INSERT INTO alert_rules(name,cluster_alias,sql_text,interval_seconds,for_seconds,webhook_id,enabled,state,last_value,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`
+	args := []any{input.Name, input.Cluster, input.SQL, input.IntervalSeconds, input.ForSeconds, input.RepeatIntervalSeconds, nullableMillis(input.SilencedUntil), input.WebhookID, boolInt(input.Enabled), StateInactive, "", "", millis(now), millis(now)}
+	query := `INSERT INTO alert_rules(name,cluster_alias,sql_text,interval_seconds,for_seconds,repeat_interval_seconds,silenced_until,webhook_id,enabled,state,last_value,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	id, err := r.insertID(ctx, query, args...)
 	if err != nil {
 		return Rule{}, err
@@ -189,7 +209,7 @@ func (r *SQLRepository) CreateRule(ctx context.Context, input RuleInput) (Rule, 
 }
 
 func (r *SQLRepository) UpdateRule(ctx context.Context, id int64, input RuleInput) (Rule, error) {
-	result, err := r.db.ExecContext(ctx, r.bind(`UPDATE alert_rules SET name=?,cluster_alias=?,sql_text=?,interval_seconds=?,for_seconds=?,webhook_id=?,enabled=?,state=?,active_since=NULL,last_error='',updated_at=? WHERE id=?`), input.Name, input.Cluster, input.SQL, input.IntervalSeconds, input.ForSeconds, input.WebhookID, boolInt(input.Enabled), StateInactive, millis(time.Now()), id)
+	result, err := r.db.ExecContext(ctx, r.bind(`UPDATE alert_rules SET name=?,cluster_alias=?,sql_text=?,interval_seconds=?,for_seconds=?,repeat_interval_seconds=?,silenced_until=?,webhook_id=?,enabled=?,state=?,active_since=NULL,last_delivered_at=NULL,last_error='',updated_at=? WHERE id=?`), input.Name, input.Cluster, input.SQL, input.IntervalSeconds, input.ForSeconds, input.RepeatIntervalSeconds, nullableMillis(input.SilencedUntil), input.WebhookID, boolInt(input.Enabled), StateInactive, millis(time.Now()), id)
 	if err != nil {
 		return Rule{}, err
 	}
@@ -211,12 +231,12 @@ func (r *SQLRepository) DeleteRule(ctx context.Context, id int64) error {
 }
 
 func (r *SQLRepository) UpdateRuleState(ctx context.Context, id int64, state RuleState) error {
-	_, err := r.db.ExecContext(ctx, r.bind(`UPDATE alert_rules SET state=?,active_since=?,last_evaluated_at=?,last_value=?,last_error=?,updated_at=? WHERE id=?`), state.State, nullableMillis(state.ActiveSince), millis(state.LastEvaluatedAt), state.LastValue, state.LastError, millis(time.Now()), id)
+	_, err := r.db.ExecContext(ctx, r.bind(`UPDATE alert_rules SET state=?,active_since=?,last_evaluated_at=?,last_delivered_at=?,last_value=?,last_error=?,updated_at=? WHERE id=?`), state.State, nullableMillis(state.ActiveSince), millis(state.LastEvaluatedAt), nullableMillis(state.LastDeliveredAt), state.LastValue, state.LastError, millis(time.Now()), id)
 	return err
 }
 
 func (r *SQLRepository) Webhooks(ctx context.Context) ([]Webhook, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,name,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at FROM alert_webhooks ORDER BY id`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,name,channel_type,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at FROM alert_webhooks ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +253,7 @@ func (r *SQLRepository) Webhooks(ctx context.Context) ([]Webhook, error) {
 }
 
 func (r *SQLRepository) Webhook(ctx context.Context, id int64) (Webhook, error) {
-	item, err := scanWebhook(r.db.QueryRowContext(ctx, r.bind(`SELECT id,name,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at FROM alert_webhooks WHERE id=?`), id))
+	item, err := scanWebhook(r.db.QueryRowContext(ctx, r.bind(`SELECT id,name,channel_type,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at FROM alert_webhooks WHERE id=?`), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Webhook{}, ErrNotFound
 	}
@@ -243,9 +263,12 @@ func (r *SQLRepository) Webhook(ctx context.Context, id int64) (Webhook, error) 
 func scanWebhook(row scanner) (Webhook, error) {
 	var item Webhook
 	var auth, created, updated int64
-	err := row.Scan(&item.ID, &item.Name, &item.URLHint, &item.TargetEncrypted, &item.AuthEncrypted, &auth, &created, &updated)
+	err := row.Scan(&item.ID, &item.Name, &item.ChannelType, &item.URLHint, &item.TargetEncrypted, &item.AuthEncrypted, &auth, &created, &updated)
 	if err != nil {
 		return Webhook{}, err
+	}
+	if item.ChannelType == "" {
+		item.ChannelType = "generic"
 	}
 	item.AuthConfigured = auth != 0
 	item.CredentialsPresent = item.TargetEncrypted != ""
@@ -255,7 +278,11 @@ func scanWebhook(row scanner) (Webhook, error) {
 
 func (r *SQLRepository) CreateWebhook(ctx context.Context, input WebhookInput) (Webhook, error) {
 	now := time.Now().UTC()
-	id, err := r.insertID(ctx, `INSERT INTO alert_webhooks(name,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, input.Name, input.URLHint, input.TargetEncrypted, input.AuthEncrypted, boolInt(input.AuthConfigured), millis(now), millis(now))
+	channel := input.ChannelType
+	if channel == "" {
+		channel = "generic"
+	}
+	id, err := r.insertID(ctx, `INSERT INTO alert_webhooks(name,channel_type,url_hint,target_encrypted,auth_encrypted,auth_configured,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, input.Name, channel, input.URLHint, input.TargetEncrypted, input.AuthEncrypted, boolInt(input.AuthConfigured), millis(now), millis(now))
 	if err != nil {
 		return Webhook{}, err
 	}
@@ -265,10 +292,14 @@ func (r *SQLRepository) CreateWebhook(ctx context.Context, input WebhookInput) (
 func (r *SQLRepository) UpdateWebhook(ctx context.Context, id int64, input WebhookInput, updateTarget bool) (Webhook, error) {
 	var result sql.Result
 	var err error
+	channel := input.ChannelType
+	if channel == "" {
+		channel = "generic"
+	}
 	if updateTarget {
-		result, err = r.db.ExecContext(ctx, r.bind(`UPDATE alert_webhooks SET name=?,url_hint=?,target_encrypted=?,auth_encrypted=?,auth_configured=?,updated_at=? WHERE id=?`), input.Name, input.URLHint, input.TargetEncrypted, input.AuthEncrypted, boolInt(input.AuthConfigured), millis(time.Now()), id)
+		result, err = r.db.ExecContext(ctx, r.bind(`UPDATE alert_webhooks SET name=?,channel_type=?,url_hint=?,target_encrypted=?,auth_encrypted=?,auth_configured=?,updated_at=? WHERE id=?`), input.Name, channel, input.URLHint, input.TargetEncrypted, input.AuthEncrypted, boolInt(input.AuthConfigured), millis(time.Now()), id)
 	} else {
-		result, err = r.db.ExecContext(ctx, r.bind(`UPDATE alert_webhooks SET name=?,updated_at=? WHERE id=?`), input.Name, millis(time.Now()), id)
+		result, err = r.db.ExecContext(ctx, r.bind(`UPDATE alert_webhooks SET name=?,channel_type=?,updated_at=? WHERE id=?`), input.Name, channel, millis(time.Now()), id)
 	}
 	if err != nil {
 		return Webhook{}, err

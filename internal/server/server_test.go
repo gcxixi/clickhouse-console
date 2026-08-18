@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -9,16 +10,19 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gcxixi/clickhouse-console/internal/alerting"
 	ch "github.com/gcxixi/clickhouse-console/internal/clickhouse"
 	"github.com/gcxixi/clickhouse-console/internal/clusterconfig"
 	"github.com/gcxixi/clickhouse-console/internal/store"
@@ -506,4 +510,230 @@ func testPlatformStore(t *testing.T) *clusterconfig.Store {
 		t.Fatal(err)
 	}
 	return platform
+}
+
+func TestProcessesAndKillQueryIntegration(t *testing.T) {
+	var killedQueryID string
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(query, "system.processes") {
+			_, _ = io.WriteString(w, `{"meta":[{"name":"query_id","type":"String"}],"data":[{"query_id":"q-42","user":"default","address":"127.0.0.1","elapsed":5.2,"read_rows":5000,"read_bytes":20480,"total_rows_approx":50000,"memory_usage":2097152,"query":"SELECT count() FROM numbers(1000000)"}],"rows":1}`)
+			return
+		}
+		if strings.HasPrefix(query, "KILL QUERY") {
+			killedQueryID = query
+			_, _ = io.WriteString(w, `{"rows":0}`)
+			return
+		}
+		http.Error(w, "unexpected query: "+query, http.StatusBadRequest)
+	}))
+	defer clickhouseServer.Close()
+
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateUser("viewer", "viewer-password-123", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
+
+	login := func(username, password string) (*http.Cookie, string) {
+		body, _ := json.Marshal(map[string]string{"username": username, "password": password})
+		req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login %s = %d", username, rec.Code)
+		}
+		var session struct {
+			CSRF string `json:"csrf"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &session)
+		return rec.Result().Cookies()[0], session.CSRF
+	}
+
+	adminCookie, adminCSRF := login("admin", "test-password-123")
+	viewerCookie, viewerCSRF := login("viewer", "viewer-password-123")
+
+	// 1. GET /api/processes
+	req := httptest.NewRequest(http.MethodGet, "/api/processes", nil)
+	req.AddCookie(adminCookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get processes status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"query_id":"q-42"`) {
+		t.Fatalf("processes response missing query: %s", rec.Body.String())
+	}
+
+	// 2. Viewer cannot kill
+	killBody, _ := json.Marshal(map[string]string{"query_id": "q-42"})
+	killReq := httptest.NewRequest(http.MethodPost, "/api/processes/kill", bytes.NewReader(killBody))
+	killReq.AddCookie(viewerCookie)
+	killReq.Header.Set("X-CSRF-Token", viewerCSRF)
+	killRec := httptest.NewRecorder()
+	handler.ServeHTTP(killRec, killReq)
+	if killRec.Code != http.StatusForbidden {
+		t.Fatalf("viewer kill status = %d; want 403", killRec.Code)
+	}
+
+	// 3. Admin can kill
+	killReq = httptest.NewRequest(http.MethodPost, "/api/processes/kill", bytes.NewReader(killBody))
+	killReq.AddCookie(adminCookie)
+	killReq.Header.Set("X-CSRF-Token", adminCSRF)
+	killRec = httptest.NewRecorder()
+	handler.ServeHTTP(killRec, killReq)
+	if killRec.Code != http.StatusOK || !strings.Contains(killRec.Body.String(), `"status":"killed"`) {
+		t.Fatalf("admin kill status = %d: %s", killRec.Code, killRec.Body.String())
+	}
+	if !strings.Contains(killedQueryID, "KILL QUERY WHERE query_id = 'q-42' SYNC") {
+		t.Fatalf("clickhouse received unexpected kill query: %s", killedQueryID)
+	}
+
+	// Check audit log
+	audits := db.Audits(5)
+	var foundKillAudit bool
+	for _, a := range audits {
+		if a.Action == "query.kill" && a.Statement == "q-42" && a.Status == "ok" {
+			foundKillAudit = true
+		}
+	}
+	if !foundKillAudit {
+		t.Fatalf("query.kill audit not found in %#v", audits)
+	}
+}
+
+func TestStreamExportIntegration(t *testing.T) {
+	clickhouseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		query := string(body)
+		if !strings.Contains(query, "FORMAT CSVWithNames") {
+			http.Error(w, "unexpected format in query: "+query, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/csv")
+		_, _ = io.WriteString(w, "id,name\n101,alice\n102,bob\n")
+	}))
+	defer clickhouseServer.Close()
+
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Client: ch.New(clickhouseServer.URL, "", "", "default", 100, time.Second)}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", nil, nil, nil, "")
+
+	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "test-password-123"})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	var session struct {
+		CSRF string `json:"csrf"`
+	}
+	_ = json.Unmarshal(loginRec.Body.Bytes(), &session)
+
+	exportBody, _ := json.Marshal(map[string]string{
+		"sql":      "SELECT id, name FROM users",
+		"format":   "CSVWithNames",
+		"filename": "users_dump",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/query/stream-export", bytes.NewReader(exportBody))
+	req.AddCookie(loginRec.Result().Cookies()[0])
+	req.Header.Set("X-CSRF-Token", session.CSRF)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream export status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/csv; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename="users_dump.csv"` {
+		t.Fatalf("Content-Disposition = %q", cd)
+	}
+	if !strings.Contains(rec.Body.String(), "101,alice\n102,bob\n") {
+		t.Fatalf("unexpected export content: %s", rec.Body.String())
+	}
+
+	// Verify non-query SQL is rejected
+	badBody, _ := json.Marshal(map[string]string{"sql": "DROP TABLE users"})
+	badReq := httptest.NewRequest(http.MethodPost, "/api/query/stream-export", bytes.NewReader(badBody))
+	badReq.AddCookie(loginRec.Result().Cookies()[0])
+	badReq.Header.Set("X-CSRF-Token", session.CSRF)
+	badRec := httptest.NewRecorder()
+	handler.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("bad export status = %d; want 400", badRec.Code)
+	}
+}
+
+func TestAlertWebhookTestingAndChannelsIntegration(t *testing.T) {
+	var receivedPayload []byte
+	webhookReceiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPayload, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"errcode":0,"errmsg":"ok"}`)
+	}))
+	defer webhookReceiver.Close()
+
+	db, _, err := store.Open(t.TempDir(), "admin", "test-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := make([]byte, 32)
+	codec, _ := alerting.NewSecretCodec(key)
+	service := alerting.NewService(nil, alerting.NewHTTPSender(5*time.Second), codec, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer service.Close()
+
+	dsn := "file:" + filepath.Join(t.TempDir(), "alerts.db") + "?_pragma=busy_timeout(5000)"
+	repo, err := alerting.OpenRepository(context.Background(), "sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.Configure(repo, 300)
+
+	handler := New(db, testPlatformStore(t), []Cluster{{Alias: "default", Source: "environment", Client: nil}}, 100, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)), "", service, nil, nil, "")
+
+	loginBody, _ := json.Marshal(map[string]string{"username": "admin", "password": "test-password-123"})
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(loginBody))
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	var session struct {
+		CSRF string `json:"csrf"`
+	}
+	_ = json.Unmarshal(loginRec.Body.Bytes(), &session)
+	cookie := loginRec.Result().Cookies()[0]
+
+	// Create a Webhook directly via repo with WeCom channel type
+	encTarget, _ := codec.Encrypt(webhookReceiver.URL)
+	createdWebhook, err := repo.CreateWebhook(context.Background(), alerting.WebhookInput{
+		Name:            "WeCom Bot",
+		ChannelType:     "wecom",
+		URLHint:         "https://qyapi.weixin.qq.com/robot/send",
+		TargetEncrypted: encTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger test: POST /api/alerting/webhooks/{id}/test
+	testReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/alerting/webhooks/%d/test", createdWebhook.ID), nil)
+	testReq.AddCookie(cookie)
+	testReq.Header.Set("X-CSRF-Token", session.CSRF)
+	testRec := httptest.NewRecorder()
+	handler.ServeHTTP(testRec, testReq)
+
+	if testRec.Code != http.StatusOK {
+		t.Fatalf("test webhook status = %d: %s", testRec.Code, testRec.Body.String())
+	}
+	if !strings.Contains(testRec.Body.String(), `"status":"ok"`) || !strings.Contains(testRec.Body.String(), `"http_status":200`) {
+		t.Fatalf("test webhook response: %s", testRec.Body.String())
+	}
+	if !strings.Contains(string(receivedPayload), `"msgtype":"markdown"`) {
+		t.Fatalf("wecom payload not formatted properly: %s", string(receivedPayload))
+	}
 }

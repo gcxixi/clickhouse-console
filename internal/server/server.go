@@ -101,6 +101,9 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("POST /api/cluster", s.auth(s.switchCluster))
 	m.HandleFunc("POST /api/query", s.auth(s.query))
 	m.HandleFunc("POST /api/query/dry-run", s.auth(s.dryRun))
+	m.HandleFunc("POST /api/query/stream-export", s.auth(s.streamExportQuery))
+	m.HandleFunc("GET /api/processes", s.auth(s.processes))
+	m.HandleFunc("POST /api/processes/kill", s.auth(s.killProcess))
 	m.HandleFunc("GET /api/schema/export", s.auth(s.exportDatabaseSchema))
 	m.HandleFunc("GET /api/monitor", s.auth(s.monitor))
 	m.HandleFunc("GET /api/clusters", s.admin(s.listClusters))
@@ -122,6 +125,7 @@ func New(db *store.Store, platform *clusterconfig.Store, configured []Cluster, m
 	m.HandleFunc("GET /api/alerting/webhooks", s.admin(s.alertWebhooks))
 	m.HandleFunc("POST /api/alerting/webhooks", s.admin(s.createAlertWebhook))
 	m.HandleFunc("PUT /api/alerting/webhooks/{id}", s.admin(s.updateAlertWebhook))
+	m.HandleFunc("POST /api/alerting/webhooks/{id}/test", s.admin(s.testAlertWebhook))
 	m.HandleFunc("DELETE /api/alerting/webhooks/{id}", s.admin(s.deleteAlertWebhook))
 	m.HandleFunc("GET /api/alerting/events", s.admin(s.alertEvents))
 	m.HandleFunc("GET /api/alerting/deliveries", s.admin(s.alertDeliveries))
@@ -446,6 +450,167 @@ func exportFilename(database string) string {
 	}
 	return name.String() + "-schema.sql"
 }
+
+func (s *Server) streamExportQuery(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	var in struct {
+		SQL      string `json:"sql"`
+		Format   string `json:"format"`
+		Filename string `json:"filename"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	kind, err := ch.Classify(in.SQL)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if kind != "query" {
+		writeErr(w, 400, "only read queries can be exported")
+		return
+	}
+	if err = authorizeSQLKind(ss.User.Role, kind, s.enableGrant); err != nil {
+		writeErr(w, 403, err.Error())
+		return
+	}
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	format := strings.TrimSpace(in.Format)
+	if format == "" {
+		format = "CSVWithNames"
+	}
+	filename := cleanExportFilename(in.Filename, format)
+	contentType := formatContentType(format)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("X-Export-Filename", filename)
+	w.Header().Set("Cache-Control", "no-store")
+	start := time.Now()
+	err = client.StreamQuery(r.Context(), in.SQL, format, w)
+	audit := store.Audit{
+		User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "query.export.stream",
+		Statement: truncate(in.SQL, 2000), DurationMS: time.Since(start).Milliseconds(),
+		RemoteAddr: remote(r), Status: "ok",
+	}
+	if err != nil {
+		audit.Status = "error"
+		audit.Error = truncate(err.Error(), 1000)
+	}
+	s.db.AddAudit(audit)
+}
+
+func (s *Server) processes(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	list, err := client.Processes(r.Context())
+	if err != nil {
+		writeErr(w, 502, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"cluster": ss.ActiveCluster, "processes": list})
+}
+
+func (s *Server) killProcess(w http.ResponseWriter, r *http.Request) {
+	ss, _ := getSession(r)
+	if ss.User.Role == "viewer" {
+		writeErr(w, 403, "viewer role cannot kill queries")
+		return
+	}
+	var in struct {
+		QueryID string `json:"query_id"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if strings.TrimSpace(in.QueryID) == "" {
+		writeErr(w, 400, "query_id is required")
+		return
+	}
+	client, ok := s.clusterClient(ss.ActiveCluster)
+	if !ok {
+		writeErr(w, 409, "active cluster is no longer available")
+		return
+	}
+	start := time.Now()
+	err := client.KillQuery(r.Context(), in.QueryID)
+	a := store.Audit{
+		User: ss.User.Username, Cluster: ss.ActiveCluster, Action: "query.kill",
+		Statement: in.QueryID, DurationMS: time.Since(start).Milliseconds(),
+		RemoteAddr: remote(r), Status: "ok",
+	}
+	if err != nil {
+		a.Status = "error"
+		a.Error = truncate(err.Error(), 1000)
+		s.db.AddAudit(a)
+		writeErr(w, 400, err.Error())
+		return
+	}
+	s.db.AddAudit(a)
+	writeJSON(w, 200, map[string]string{"status": "killed", "query_id": in.QueryID})
+}
+
+func cleanExportFilename(filename, format string) string {
+	ext := formatExtension(format)
+	if strings.TrimSpace(filename) == "" {
+		return "export-" + time.Now().UTC().Format("20060102-150405") + "." + ext
+	}
+	var name strings.Builder
+	for _, r := range filename {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			name.WriteRune(r)
+		} else {
+			name.WriteByte('_')
+		}
+	}
+	clean := name.String()
+	if !strings.HasSuffix(strings.ToLower(clean), "."+strings.ToLower(ext)) {
+		clean += "." + ext
+	}
+	return clean
+}
+
+func formatExtension(format string) string {
+	switch strings.ToLower(format) {
+	case "csvwithnames", "csv":
+		return "csv"
+	case "tabseparatedwithnames", "tabseparated", "tsv":
+		return "tsv"
+	case "jsoneachrow", "ndjson", "jsonl":
+		return "jsonl"
+	case "json", "jsoncompact":
+		return "json"
+	case "parquet":
+		return "parquet"
+	default:
+		return "txt"
+	}
+}
+
+func formatContentType(format string) string {
+	switch strings.ToLower(format) {
+	case "csvwithnames", "csv":
+		return "text/csv; charset=utf-8"
+	case "tabseparatedwithnames", "tabseparated", "tsv":
+		return "text/tab-separated-values; charset=utf-8"
+	case "jsoneachrow", "ndjson", "jsonl":
+		return "application/x-ndjson; charset=utf-8"
+	case "json", "jsoncompact":
+		return "application/json; charset=utf-8"
+	case "parquet":
+		return "application/octet-stream"
+	default:
+		return "text/plain; charset=utf-8"
+	}
+}
+
 func (s *Server) monitor(w http.ResponseWriter, r *http.Request) {
 	ss, _ := getSession(r)
 	client, ok := s.clusterClient(ss.ActiveCluster)
@@ -511,10 +676,14 @@ func (s *Server) createCluster(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &in) {
 		return
 	}
-	user, password, err := s.decryptCredentials(in.Credentials)
-	if err != nil {
-		writeErr(w, 400, err.Error())
-		return
+	user, password := "", ""
+	if in.UpdateCredentials && in.Credentials.Ciphertext != "" {
+		var err error
+		user, password, err = s.decryptCredentials(in.Credentials)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 	}
 	s.mu.Lock()
 	for alias := range s.clusters {
@@ -625,6 +794,9 @@ func (s *Server) transportPrivateKey() (*rsa.PrivateKey, error) {
 }
 
 func (s *Server) decryptCredentials(envelope credentialEnvelope) (string, string, error) {
+	if envelope.Ciphertext == "" {
+		return "", "", nil
+	}
 	plain, err := s.decryptEnvelope(envelope)
 	if err != nil {
 		return "", "", err
@@ -634,7 +806,7 @@ func (s *Server) decryptCredentials(envelope credentialEnvelope) (string, string
 		User     string `json:"user"`
 		Password string `json:"password"`
 	}
-	if err = json.Unmarshal(plain, &credentials); err != nil || strings.TrimSpace(credentials.User) == "" {
+	if err = json.Unmarshal(plain, &credentials); err != nil {
 		return "", "", errors.New("invalid credential payload")
 	}
 	return credentials.User, credentials.Password, nil

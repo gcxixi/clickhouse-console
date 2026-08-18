@@ -12,36 +12,42 @@ const (
 )
 
 type Rule struct {
-	ID              int64      `json:"id"`
-	Name            string     `json:"name"`
-	Cluster         string     `json:"cluster"`
-	SQL             string     `json:"sql"`
-	IntervalSeconds int64      `json:"interval_seconds"`
-	ForSeconds      int64      `json:"for_seconds"`
-	WebhookID       *int64     `json:"webhook_id,omitempty"`
-	Enabled         bool       `json:"enabled"`
-	State           string     `json:"state"`
-	ActiveSince     *time.Time `json:"active_since,omitempty"`
-	LastEvaluatedAt *time.Time `json:"last_evaluated_at,omitempty"`
-	LastValue       string     `json:"last_value,omitempty"`
-	LastError       string     `json:"last_error,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                    int64      `json:"id"`
+	Name                  string     `json:"name"`
+	Cluster               string     `json:"cluster"`
+	SQL                   string     `json:"sql"`
+	IntervalSeconds       int64      `json:"interval_seconds"`
+	ForSeconds            int64      `json:"for_seconds"`
+	RepeatIntervalSeconds int64      `json:"repeat_interval_seconds"`
+	SilencedUntil         *time.Time `json:"silenced_until,omitempty"`
+	WebhookID             *int64     `json:"webhook_id,omitempty"`
+	Enabled               bool       `json:"enabled"`
+	State                 string     `json:"state"`
+	ActiveSince           *time.Time `json:"active_since,omitempty"`
+	LastEvaluatedAt       *time.Time `json:"last_evaluated_at,omitempty"`
+	LastDeliveredAt       *time.Time `json:"last_delivered_at,omitempty"`
+	LastValue             string     `json:"last_value,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type RuleInput struct {
-	Name            string `json:"name"`
-	Cluster         string `json:"cluster"`
-	SQL             string `json:"sql"`
-	IntervalSeconds int64  `json:"interval_seconds"`
-	ForSeconds      int64  `json:"for_seconds"`
-	WebhookID       *int64 `json:"webhook_id"`
-	Enabled         bool   `json:"enabled"`
+	Name                  string     `json:"name"`
+	Cluster               string     `json:"cluster"`
+	SQL                   string     `json:"sql"`
+	IntervalSeconds       int64      `json:"interval_seconds"`
+	ForSeconds            int64      `json:"for_seconds"`
+	RepeatIntervalSeconds int64      `json:"repeat_interval_seconds"`
+	SilencedUntil         *time.Time `json:"silenced_until"`
+	WebhookID             *int64     `json:"webhook_id"`
+	Enabled               bool       `json:"enabled"`
 }
 
 type Webhook struct {
 	ID                 int64     `json:"id"`
 	Name               string    `json:"name"`
+	ChannelType        string    `json:"channel_type"`
 	URLHint            string    `json:"url_hint"`
 	TargetEncrypted    string    `json:"-"`
 	AuthEncrypted      string    `json:"-"`
@@ -53,6 +59,7 @@ type Webhook struct {
 
 type WebhookInput struct {
 	Name            string
+	ChannelType     string
 	URLHint         string
 	TargetEncrypted string
 	AuthEncrypted   string
@@ -90,6 +97,7 @@ type RuleState struct {
 	State           string
 	ActiveSince     *time.Time
 	LastEvaluatedAt time.Time
+	LastDeliveredAt *time.Time
 	LastValue       string
 	LastError       string
 }
@@ -130,7 +138,7 @@ type Sender interface {
 }
 
 type WebhookTarget struct {
-	Name, URL, Authorization string
+	Name, URL, Authorization, ChannelType string
 }
 
 type SendResult struct {
