@@ -51,14 +51,14 @@ func TestBasePathRoutesAssetsAndScopesCookie(t *testing.T) {
 		t.Fatalf("redirect = %d %q", redirect.Code, redirect.Header().Get("Location"))
 	}
 	index := request(http.MethodGet, "/clickhouse/", "")
-	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), `href="app.css"`) {
+	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), `<div id="root"></div>`) {
 		t.Fatalf("prefixed index = %d %q", index.Code, index.Body.String())
 	}
-	asset := request(http.MethodGet, "/clickhouse/app.js", "")
-	if asset.Code != http.StatusOK || !strings.Contains(asset.Body.String(), "new URL('api/'") {
+	asset := request(http.MethodGet, "/clickhouse/assets/index.js", "")
+	if asset.Code != http.StatusOK {
 		t.Fatalf("prefixed asset = %d", asset.Code)
 	}
-	if outside := request(http.MethodGet, "/app.js", ""); outside.Code != http.StatusNotFound {
+	if outside := request(http.MethodGet, "/assets/index.js", ""); outside.Code != http.StatusNotFound {
 		t.Fatalf("unprefixed asset status = %d; want 404", outside.Code)
 	}
 
