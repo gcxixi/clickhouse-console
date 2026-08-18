@@ -21,16 +21,20 @@ import {
   PlayCircleOutlined,
   CopyOutlined
 } from '@ant-design/icons';
+import CodeMirror from '@uiw/react-codemirror';
+import { sql as sqlLang } from '@codemirror/lang-sql';
+import { oneDark } from '@codemirror/theme-one-dark';
 import { api } from '../api';
 
 const { Text } = Typography;
 
 interface SchemaViewProps {
   activeCluster: string;
+  themeMode?: 'light' | 'dark';
   onJumpToQuery: (sql: string) => void;
 }
 
-export const SchemaView: React.FC<SchemaViewProps> = ({ activeCluster, onJumpToQuery }) => {
+export const SchemaView: React.FC<SchemaViewProps> = ({ activeCluster, themeMode = 'dark', onJumpToQuery }) => {
   const { token } = antTheme.useToken();
   const [databases, setDatabases] = useState<string[]>([]);
   const [selectedDb, setSelectedDb] = useState<string>('');
@@ -286,11 +290,12 @@ export const SchemaView: React.FC<SchemaViewProps> = ({ activeCluster, onJumpToQ
         </div>
       </Card>
 
-      {/* DDL Drawer */}
+      {/* DDL Drawer with CodeMirror Syntax Highlighting */}
       <Drawer
         title={ddlDrawer.title}
         placement="right"
-        width={600}
+        width={660}
+        bodyStyle={{ padding: 12, display: 'flex', flexDirection: 'column', height: '100%' }}
         onClose={() => setDdlDrawer({ open: false, title: '', ddl: '' })}
         open={ddlDrawer.open}
         extra={
@@ -306,20 +311,29 @@ export const SchemaView: React.FC<SchemaViewProps> = ({ activeCluster, onJumpToQ
           </Button>
         }
       >
-        <pre
+        <div
           style={{
-            margin: 0,
-            padding: 14,
+            flex: 1,
             borderRadius: 8,
-            background: token.colorFillAlter,
-            fontSize: 12,
-            fontFamily: 'JetBrains Mono, monospace',
-            overflow: 'auto',
-            lineHeight: 1.6
+            overflow: 'hidden',
+            border: `1px solid ${token.colorBorderSecondary}`,
+            height: '100%'
           }}
         >
-          {ddlDrawer.ddl}
-        </pre>
+          <CodeMirror
+            value={ddlDrawer.ddl}
+            height="100%"
+            theme={themeMode === 'dark' ? oneDark : 'light'}
+            extensions={[sqlLang()]}
+            editable={false}
+            basicSetup={{
+              lineNumbers: true,
+              foldGutter: true,
+              highlightActiveLine: false
+            }}
+            style={{ height: '100%', fontSize: 13 }}
+          />
+        </div>
       </Drawer>
     </div>
   );

@@ -135,7 +135,11 @@ export const App: React.FC = () => {
               />
             )}
             {activeView === 'schema' && (
-              <SchemaView activeCluster={activeCluster} onJumpToQuery={handleJumpToQuery} />
+              <SchemaView
+                activeCluster={activeCluster}
+                themeMode={themeMode}
+                onJumpToQuery={handleJumpToQuery}
+              />
             )}
             {activeView === 'processes' && (
               <ProcessesView activeCluster={activeCluster} currentUser={user} />
